@@ -1,0 +1,23 @@
+interface plugin {
+    record error {
+        code: u32,
+        msg: string,
+    }
+
+    variant action {
+        responed(list<u8>),
+        next(option<list<u8>>)
+    }
+
+    run: func() -> result<action, error>
+}
+
+interface helper {
+    dns-packet: func() -> list<u8>
+    load-config: func() -> string
+}
+
+default world rubydns {
+  import helper: self.helper
+  export plugin: self.plugin
+}

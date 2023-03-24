@@ -1,0 +1,25 @@
+[package]
+name = "rubydns"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs"] }
+wasmtime = { version = "7", features = ["component-model"] }
+host = { git = "https://github.com/bytecodealliance/preview2-prototyping", branch = "main" }
+wasi-cap-std-sync = { git = "https://github.com/bytecodealliance/preview2-prototyping", branch = "main" }
+async-trait = "0.1"
+deadpool = { version = "0.9", default-features = false, features = ["managed"] }
+trust-dns-proto = "0.22"
+bytes = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tap = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
