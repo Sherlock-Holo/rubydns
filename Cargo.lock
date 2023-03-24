@@ -700,17 +700,17 @@ checksum = "fed44880c466736ef9a5c5b5facefb5ed0785676d0c02d612db14e54f0d84286"
 [[package]]
 name = "host"
 version = "0.0.0"
-source = "git+https://github.com/bytecodealliance/preview2-prototyping?branch=main#4e84fc230d3c167b6353ace721f23a9e504f3195"
+source = "git+https://github.com/bytecodealliance/preview2-prototyping?rev=408f0bfcec31a1880b6df06341f996e8e445a442#408f0bfcec31a1880b6df06341f996e8e445a442"
 dependencies = [
- "anyhow",
- "async-trait",
- "cap-rand",
- "cap-std",
- "clap",
- "thiserror",
- "tokio",
- "tracing",
- "wasi-cap-std-sync",
+    "anyhow",
+    "async-trait",
+    "cap-rand",
+    "cap-std",
+    "clap",
+    "thiserror",
+    "tokio",
+    "tracing",
+    "wasi-cap-std-sync",
  "wasi-common",
  "wasmtime",
 ]
@@ -1644,17 +1644,17 @@ checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
 [[package]]
 name = "wasi-cap-std-sync"
 version = "0.0.0"
-source = "git+https://github.com/bytecodealliance/preview2-prototyping?branch=main#4e84fc230d3c167b6353ace721f23a9e504f3195"
+source = "git+https://github.com/bytecodealliance/preview2-prototyping?rev=408f0bfcec31a1880b6df06341f996e8e445a442#408f0bfcec31a1880b6df06341f996e8e445a442"
 dependencies = [
- "anyhow",
- "async-trait",
- "cap-fs-ext",
- "cap-rand",
- "cap-std",
- "cap-time-ext",
- "fs-set-times",
- "io-extras",
- "io-lifetimes",
+    "anyhow",
+    "async-trait",
+    "cap-fs-ext",
+    "cap-rand",
+    "cap-std",
+    "cap-time-ext",
+    "fs-set-times",
+    "io-extras",
+    "io-lifetimes",
  "ipnet",
  "is-terminal",
  "once_cell",
@@ -1668,17 +1668,17 @@ dependencies = [
 [[package]]
 name = "wasi-common"
 version = "0.0.0"
-source = "git+https://github.com/bytecodealliance/preview2-prototyping?branch=main#4e84fc230d3c167b6353ace721f23a9e504f3195"
+source = "git+https://github.com/bytecodealliance/preview2-prototyping?rev=408f0bfcec31a1880b6df06341f996e8e445a442#408f0bfcec31a1880b6df06341f996e8e445a442"
 dependencies = [
- "anyhow",
- "async-trait",
- "bitflags",
- "cap-fs-ext",
- "cap-rand",
- "cap-std",
- "io-extras",
- "ipnet",
- "rustix",
+    "anyhow",
+    "async-trait",
+    "bitflags",
+    "cap-fs-ext",
+    "cap-rand",
+    "cap-std",
+    "io-extras",
+    "ipnet",
+    "rustix",
  "system-interface",
  "thiserror",
  "tracing",

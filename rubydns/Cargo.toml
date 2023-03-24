@@ -8,8 +8,8 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs"] }
 wasmtime = { version = "7", features = ["component-model"] }
-host = { git = "https://github.com/bytecodealliance/preview2-prototyping", branch = "main" }
-wasi-cap-std-sync = { git = "https://github.com/bytecodealliance/preview2-prototyping", branch = "main" }
+host = { git = "https://github.com/bytecodealliance/preview2-prototyping", rev = "408f0bfcec31a1880b6df06341f996e8e445a442" }
+wasi-cap-std-sync = { git = "https://github.com/bytecodealliance/preview2-prototyping", rev = "408f0bfcec31a1880b6df06341f996e8e445a442" }
 async-trait = "0.1"
 deadpool = { version = "0.9", default-features = false, features = ["managed"] }
 trust-dns-proto = "0.22"
