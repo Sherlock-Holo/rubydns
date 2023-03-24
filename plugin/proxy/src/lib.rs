@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 use serde::Deserialize;
 use tracing::error;
@@ -44,14 +44,15 @@ impl Plugin for Runner {
 }
 
 fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Action, Error> {
-    let udp_socket = UdpSocket::bind("0.0.0.0:0").map_err(|err| {
-        error!(%err, "bind udp socket failed");
+    let udp_socket =
+        UdpSocket::bind((IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)).map_err(|err| {
+            error!(%err, "bind udp socket failed");
 
-        Error {
-            code: err.raw_os_error().unwrap_or(1) as _,
-            msg: err.to_string(),
-        }
-    })?;
+            Error {
+                code: err.raw_os_error().unwrap_or(1) as _,
+                msg: err.to_string(),
+            }
+        })?;
 
     udp_socket.connect(nameserver).map_err(|err| {
         error!(%err, %nameserver, "connect nameserver failed");
