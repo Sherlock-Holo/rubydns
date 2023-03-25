@@ -6,7 +6,9 @@ use bytes::Bytes;
 use deadpool::managed;
 use deadpool::managed::{Pool, RecycleResult};
 use host::command;
+use tap::TapFallible;
 use thiserror::Error;
+use tracing::error;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
@@ -15,16 +17,23 @@ use super::host_helper::HostHelper;
 use super::udp_helper;
 use super::Rubydns;
 
+#[derive(Clone)]
 pub struct PluginPool {
     pool: Pool<Manager>,
 }
 
 impl PluginPool {
-    pub fn new(engine: Engine, plugin_binary: Bytes, raw_config: String) -> Self {
+    pub fn new(
+        engine: Engine,
+        plugin_binary: Bytes,
+        raw_config: String,
+        next_plugin: Option<PluginPool>,
+    ) -> Self {
         let pool = Pool::builder(Manager {
             engine,
             plugin_binary,
             raw_config: Arc::new(raw_config),
+            next_plugin,
         })
         .build()
         .expect("build plugin pool failed");
@@ -51,6 +60,7 @@ struct Manager {
     engine: Engine,
     plugin_binary: Bytes,
     raw_config: Arc<String>,
+    next_plugin: Option<PluginPool>,
 }
 
 #[async_trait]
@@ -60,15 +70,21 @@ impl managed::Manager for Manager {
 
     async fn create(&self) -> Result<Self::Type, Self::Error> {
         let mut linker = Linker::new(&self.engine);
-        let mut store = Store::new(&self.engine, HostHelper::new(self.raw_config.clone()));
+        let mut store = Store::new(
+            &self.engine,
+            HostHelper::new(self.raw_config.clone(), self.next_plugin.clone()),
+        );
 
         store.out_of_fuel_async_yield(u64::MAX, 10000);
-        helper::add_to_linker(&mut linker, |state: &mut HostHelper| state)?;
-        command::add_to_linker(&mut linker, |state: &mut HostHelper| state.wasi_ctx())?;
-        udp_helper::add_to_linker(&mut linker, |state: &mut HostHelper| state.udp_helper())?;
+
+        helper::add_to_linker(&mut linker, |state: &mut HostHelper| state)
+            .tap_err(|err| error!(%err, "helper add to linker failed"))?;
+        command::add_to_linker(&mut linker, |state: &mut HostHelper| state.wasi_ctx())
+            .tap_err(|err| error!(%err, "command add to linker failed"))?;
+        udp_helper::add_to_linker(&mut linker, |state: &mut HostHelper| state.udp_helper())
+            .tap_err(|err| error!(%err, "udp_helper add to linker failed"))?;
 
         let component = Component::new(&self.engine, &self.plugin_binary)?;
-
         let (plugin, _) = Rubydns::instantiate_async(&mut store, &component, &linker).await?;
 
         Ok((plugin, store))

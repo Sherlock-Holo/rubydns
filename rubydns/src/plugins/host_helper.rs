@@ -5,32 +5,32 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use host::WasiCtx;
+use tap::TapFallible;
 use tokio::net::UdpSocket;
 use tracing::error;
-use trust_dns_proto::op::Message;
 use wasi_cap_std_sync::WasiCtxBuilder;
 
+use super::helper::Error;
 use super::helper::Host as HelperHost;
+use super::pool::PluginPool;
 use super::udp_helper::{Addr, Host as UdpHost};
 
 pub struct HostHelper {
-    dns_message: Option<Message>,
-    dns_packet: Option<Bytes>,
     wasi_ctx: WasiCtx,
     raw_config: Arc<String>,
     udp_helper: UdpHelper,
+    next_plugin: Option<PluginPool>,
 }
 
 impl HostHelper {
-    pub fn new(raw_config: Arc<String>) -> Self {
+    pub fn new(raw_config: Arc<String>, next_plugin: Option<PluginPool>) -> Self {
         Self {
-            dns_message: None,
-            dns_packet: None,
             wasi_ctx: WasiCtxBuilder::new().inherit_network().build(),
             raw_config,
             udp_helper: Default::default(),
+            next_plugin,
         }
     }
 
@@ -42,14 +42,7 @@ impl HostHelper {
         &mut self.udp_helper
     }
 
-    pub fn update(&mut self, dns_message: Message, dns_packet: Bytes) {
-        self.dns_message.replace(dns_message);
-        self.dns_packet.replace(dns_packet);
-    }
-
     pub fn reset(&mut self) {
-        self.dns_message.take();
-        self.dns_packet.take();
         self.udp_helper.reset();
     }
 }
@@ -57,17 +50,29 @@ impl HostHelper {
 #[async_trait]
 impl HelperHost for HostHelper {
     #[inline]
-    async fn dns_packet(&mut self) -> wasmtime::Result<Vec<u8>> {
-        Ok(self
-            .dns_packet
-            .as_ref()
-            .expect("dns_packet not init")
-            .to_vec())
-    }
-
-    #[inline]
     async fn load_config(&mut self) -> wasmtime::Result<String> {
         Ok(self.raw_config.to_string())
+    }
+
+    async fn call_next_plugin(
+        &mut self,
+        dns_packet: Vec<u8>,
+    ) -> anyhow::Result<Option<Result<Vec<u8>, Error>>> {
+        let plugin_pool = match &self.next_plugin {
+            None => return Ok(None),
+            Some(plugin_pool) => plugin_pool,
+        };
+
+        let mut next_plugin = plugin_pool
+            .get_plugin()
+            .await
+            .tap_err(|err| error!(%err, "get next plugin failed"))?;
+
+        let (plugin, store) = &mut *next_plugin;
+
+        let result = plugin.plugin().call_run(store, &dns_packet).await?;
+
+        Ok(Some(result))
     }
 }
 
