@@ -4,8 +4,8 @@ use plugin_utils::UdpSocket;
 use serde::Deserialize;
 use tracing::error;
 
-use crate::helper::{dns_packet, load_config};
-use crate::plugin::{Action, Error, Plugin};
+use crate::helper::load_config;
+use crate::plugin::{Error, Plugin};
 
 wit_bindgen::generate!("rubydns");
 
@@ -18,7 +18,7 @@ struct Config {
 struct Runner;
 
 impl Plugin for Runner {
-    fn run() -> Result<Action, Error> {
+    fn run(dns_packet: Vec<u8>) -> Result<Vec<u8>, Error> {
         let config = load_config();
         let config: Config = serde_yaml::from_str(&config).map_err(|err| {
             error!(%err, "load proxy config failed");
@@ -29,7 +29,6 @@ impl Plugin for Runner {
             }
         })?;
 
-        let dns_packet = dns_packet();
         for nameserver in config.nameservers {
             match handle_dns(&dns_packet, nameserver) {
                 Err(_) => continue,
@@ -44,7 +43,7 @@ impl Plugin for Runner {
     }
 }
 
-fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Action, Error> {
+fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Vec<u8>, Error> {
     let udp_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0))
         .map_err(|err| {
             error!(%err, "bind udp socket failed");
@@ -64,7 +63,7 @@ fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Action, Error
         }
     })?;
 
-    udp_socket.send(&dns_packet).map_err(|err| {
+    udp_socket.send(dns_packet).map_err(|err| {
         error!(%err, %nameserver, "send dns packet failed");
 
         Error {
@@ -82,7 +81,7 @@ fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Action, Error
         }
     })?;
 
-    Ok(Action::Responed(data))
+    Ok(data)
 }
 
 export_rubydns!(Runner);

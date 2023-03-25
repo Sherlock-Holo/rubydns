@@ -1,16 +1,17 @@
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
+use futures_util::{stream, TryStreamExt};
+use tap::TapFallible;
 use thiserror::Error;
 use tokio::fs;
-use tracing::instrument;
+use tracing::{error, info, instrument};
 use trust_dns_proto::error::ProtoError;
-use trust_dns_proto::op::Message;
+use trust_dns_proto::op::{Message, MessageType, ResponseCode};
 use wasmtime::component::bindgen;
 use wasmtime::Engine;
 
 pub use self::config::Plugin as PluginConfig;
-use self::plugin::Action;
 use self::pool::PluginPool;
 
 mod config;
@@ -32,13 +33,10 @@ pub enum Error {
 
     #[error("get plugin from pool failed: {0}")]
     PluginPool(anyhow::Error),
-
-    #[error("plugin handle dns error: {0}")]
-    PluginHandle(plugin::Error),
 }
 
 pub struct PluginChain {
-    plugins: Vec<PluginState>,
+    plugin: PluginPool,
 }
 
 impl PluginChain {
@@ -47,21 +45,28 @@ impl PluginChain {
         engine_config.wasm_component_model(true).async_support(true);
         let engine = Engine::new(&engine_config)?;
 
-        let mut plugins = Vec::with_capacity(configs.len());
-        for plugin_config in configs {
-            let raw_config = serde_yaml::to_string(&plugin_config.config)?;
-            let plugin_path = match plugin_config.plugin_path {
-                None => plugin_dir.join(plugin_config.name + ".wasm"),
-                Some(plugin_path) => PathBuf::from(plugin_path + ".wasm"),
-            };
+        let plugin = stream::iter(configs.into_iter().rev().map(Ok))
+            .try_fold(None, |next_plugin, plugin_config| {
+                let engine = engine.clone();
 
-            let plugin_binary = fs::read(&plugin_path).await?;
-            let plugin_pool = PluginPool::new(engine.clone(), plugin_binary.into(), raw_config);
+                async move {
+                    let raw_config = serde_yaml::to_string(&plugin_config.config)?;
+                    let plugin_path = match plugin_config.plugin_path {
+                        None => plugin_dir.join(plugin_config.name + ".wasm"),
+                        Some(plugin_path) => PathBuf::from(plugin_path + ".wasm"),
+                    };
 
-            plugins.push(PluginState { plugin_pool });
-        }
+                    let plugin_binary = fs::read(&plugin_path).await?;
+                    let plugin_pool =
+                        PluginPool::new(engine, plugin_binary.into(), raw_config, next_plugin);
 
-        Ok(Self { plugins })
+                    Ok::<_, anyhow::Error>(Some(plugin_pool))
+                }
+            })
+            .await?
+            .expect("no plugin set");
+
+        Ok(Self { plugin })
     }
 }
 
@@ -70,50 +75,43 @@ impl PluginChain {
     pub async fn handle_dns(
         &self,
         mut dns_message: Message,
-        mut dns_packet: Bytes,
+        dns_packet: Bytes,
     ) -> Result<(Message, Bytes), Error> {
-        for dns_plugin in &self.plugins {
-            let mut obj = dns_plugin
-                .plugin_pool
-                .get_plugin()
-                .await
-                .map_err(Error::PluginPool)?;
-            let (plugin, store) = &mut *obj;
-            store
-                .data_mut()
-                .update(dns_message.clone(), dns_packet.clone());
+        let mut obj = self.plugin.get_plugin().await.map_err(Error::PluginPool)?;
+        let (plugin, store) = &mut *obj;
 
-            let result = plugin
-                .plugin()
-                .call_run(store)
-                .await
-                .map_err(Error::PluginRun)?;
+        let result = plugin
+            .plugin()
+            .call_run(store, &dns_packet)
+            .await
+            .map_err(|err| {
+                error!(%err, "plugin run failed");
 
-            let action = match result {
-                Err(err) => return Err(Error::PluginHandle(err)),
-                Ok(action) => action,
-            };
+                Error::PluginRun(err)
+            })?;
 
-            match action {
-                Action::Responed(response) => {
-                    let response_message = Message::from_vec(&response)?;
+        let data = match result {
+            Err(err) => {
+                error!(?err, "plugin handle dns failed");
 
-                    return Ok((response_message, Bytes::from(response)));
-                }
+                dns_message.set_message_type(MessageType::Response);
+                dns_message.set_response_code(ResponseCode::ServFail);
 
-                Action::Next(response) => {
-                    if let Some(response) = response {
-                        dns_packet = response.into();
-                        dns_message = Message::from_vec(&dns_packet)?;
-                    }
-                }
+                let response_packet = dns_message
+                    .to_vec()
+                    .tap_err(|err| error!(%err, ?dns_message, "encode error dns message failed"))?;
+
+                return Ok((dns_message, response_packet.into()));
             }
-        }
 
-        todo!("send dns packet back?")
+            Ok(data) => data,
+        };
+
+        info!("call plugin done");
+
+        let response_message = Message::from_vec(&data)
+            .tap_err(|err| error!(%err, "decode response dns message failed"))?;
+
+        Ok((response_message, data.into()))
     }
-}
-
-struct PluginState {
-    plugin_pool: PluginPool,
 }

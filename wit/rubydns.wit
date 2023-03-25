@@ -1,20 +1,17 @@
 interface plugin {
-    record error {
-        code: u32,
-        msg: string,
-    }
+  use self.helper.{error}
 
-    variant action {
-        responed(list<u8>),
-        next(option<list<u8>>)
-  }
-
-  run: func() -> result<action, error>
+  run: func(dns-packet: list<u8>) -> result<list<u8>, error>
 }
 
 interface helper {
-  dns-packet: func() -> list<u8>
+  record error {
+    code: u32,
+    msg: string,
+  }
+
   load-config: func() -> string
+  call-next-plugin: func(dns-packet: list<u8>) -> option<result<list<u8>, error>>
 }
 
 interface udp-helper {
