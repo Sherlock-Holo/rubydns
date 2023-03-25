@@ -1,4 +1,5 @@
 use std::ops::DerefMut;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -11,6 +12,7 @@ use wasmtime::{Engine, Store};
 
 use super::helper;
 use super::host_helper::HostHelper;
+use super::udp_helper;
 use super::Rubydns;
 
 pub struct PluginPool {
@@ -22,7 +24,7 @@ impl PluginPool {
         let pool = Pool::builder(Manager {
             engine,
             plugin_binary,
-            raw_config,
+            raw_config: Arc::new(raw_config),
         })
         .build()
         .expect("build plugin pool failed");
@@ -48,7 +50,7 @@ pub struct Error {
 struct Manager {
     engine: Engine,
     plugin_binary: Bytes,
-    raw_config: String,
+    raw_config: Arc<String>,
 }
 
 #[async_trait]
@@ -63,6 +65,7 @@ impl managed::Manager for Manager {
         store.out_of_fuel_async_yield(u64::MAX, 10000);
         helper::add_to_linker(&mut linker, |state: &mut HostHelper| state)?;
         command::add_to_linker(&mut linker, |state: &mut HostHelper| state.wasi_ctx())?;
+        udp_helper::add_to_linker(&mut linker, |state: &mut HostHelper| state.udp_helper())?;
 
         let component = Component::new(&self.engine, &self.plugin_binary)?;
 
