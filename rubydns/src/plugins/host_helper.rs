@@ -3,9 +3,11 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
+use dashmap::DashMap;
 use host::WasiCtx;
 use tap::TapFallible;
 use tokio::net::UdpSocket;
@@ -22,15 +24,21 @@ pub struct HostHelper {
     raw_config: Arc<String>,
     udp_helper: UdpHelper,
     next_plugin: Option<PluginPool>,
+    plugin_store_map: Arc<DashMap<Bytes, StoreValue>>,
 }
 
 impl HostHelper {
-    pub fn new(raw_config: Arc<String>, next_plugin: Option<PluginPool>) -> Self {
+    pub fn new(
+        raw_config: Arc<String>,
+        next_plugin: Option<PluginPool>,
+        plugin_store_map: Arc<DashMap<Bytes, StoreValue>>,
+    ) -> Self {
         Self {
             wasi_ctx: WasiCtxBuilder::new().inherit_network().build(),
             raw_config,
             udp_helper: Default::default(),
             next_plugin,
+            plugin_store_map,
         }
     }
 
@@ -73,6 +81,46 @@ impl HelperHost for HostHelper {
         let result = plugin.plugin().call_run(store, &dns_packet).await?;
 
         Ok(Some(result))
+    }
+
+    async fn map_set(
+        &mut self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        timeout: Option<u64>,
+    ) -> anyhow::Result<()> {
+        self.plugin_store_map.insert(
+            key.into(),
+            StoreValue {
+                data: value.into(),
+                timeout: timeout.map(|timeout| Instant::now() + Duration::from_secs(timeout)),
+            },
+        );
+
+        Ok(())
+    }
+
+    async fn map_get(&mut self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+        match self.plugin_store_map.get(key.as_slice()) {
+            None => Ok(None),
+            Some(value) => {
+                if let Some(timeout) = value.timeout {
+                    if Instant::now().checked_duration_since(timeout).is_some() {
+                        self.plugin_store_map.remove(key.as_slice());
+
+                        return Ok(None);
+                    }
+                }
+
+                Ok(Some(value.data.clone().into()))
+            }
+        }
+    }
+
+    async fn map_remove(&mut self, key: Vec<u8>) -> anyhow::Result<()> {
+        self.plugin_store_map.remove(key.as_slice());
+
+        Ok(())
     }
 }
 
@@ -274,4 +322,9 @@ impl UdpHost for UdpHelper {
 
 fn io_err_to_errno(err: io::Error) -> u32 {
     err.raw_os_error().unwrap_or(1) as _
+}
+
+pub struct StoreValue {
+    data: Bytes,
+    timeout: Option<Instant>,
 }

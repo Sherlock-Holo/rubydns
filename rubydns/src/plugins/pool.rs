@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::DashMap;
 use deadpool::managed;
 use deadpool::managed::{Pool, RecycleResult};
 use host::command;
@@ -16,6 +17,7 @@ use super::helper;
 use super::host_helper::HostHelper;
 use super::udp_helper;
 use super::Rubydns;
+use crate::plugins::host_helper::StoreValue;
 
 #[derive(Clone)]
 pub struct PluginPool {
@@ -34,6 +36,7 @@ impl PluginPool {
             plugin_binary,
             raw_config: Arc::new(raw_config),
             next_plugin,
+            plugin_store_map: Arc::new(Default::default()),
         })
         .build()
         .expect("build plugin pool failed");
@@ -61,6 +64,7 @@ struct Manager {
     plugin_binary: Bytes,
     raw_config: Arc<String>,
     next_plugin: Option<PluginPool>,
+    plugin_store_map: Arc<DashMap<Bytes, StoreValue>>,
 }
 
 #[async_trait]
@@ -72,7 +76,11 @@ impl managed::Manager for Manager {
         let mut linker = Linker::new(&self.engine);
         let mut store = Store::new(
             &self.engine,
-            HostHelper::new(self.raw_config.clone(), self.next_plugin.clone()),
+            HostHelper::new(
+                self.raw_config.clone(),
+                self.next_plugin.clone(),
+                self.plugin_store_map.clone(),
+            ),
         );
 
         store.out_of_fuel_async_yield(u64::MAX, 10000);

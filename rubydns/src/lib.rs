@@ -1,5 +1,7 @@
 #![feature(type_alias_impl_trait)]
 
+extern crate core;
+
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
