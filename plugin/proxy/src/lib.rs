@@ -1,5 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use plugin_utils::UdpSocket;
 use serde::Deserialize;
 use tracing::error;
 
@@ -44,8 +45,8 @@ impl Plugin for Runner {
 }
 
 fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Action, Error> {
-    let udp_socket =
-        UdpSocket::bind((IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)).map_err(|err| {
+    let udp_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0))
+        .map_err(|err| {
             error!(%err, "bind udp socket failed");
 
             Error {
@@ -72,9 +73,7 @@ fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Action, Error
         }
     })?;
 
-    let mut buf = vec![0; 4096];
-
-    let n = udp_socket.recv(&mut buf).map_err(|err| {
+    let data = udp_socket.recv(4096).map_err(|err| {
         error!(%err, %nameserver, "recv dns packet failed");
 
         Error {
@@ -83,9 +82,7 @@ fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Action, Error
         }
     })?;
 
-    buf.truncate(n);
-
-    Ok(Action::Responed(buf))
+    Ok(Action::Responed(data))
 }
 
 export_rubydns!(Runner);

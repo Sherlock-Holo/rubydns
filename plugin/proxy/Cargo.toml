@@ -13,3 +13,4 @@ wit-bindgen = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 tracing = "0.1"
+plugin-utils = { path = "../plugin-utils" }
