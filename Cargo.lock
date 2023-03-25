@@ -702,15 +702,15 @@ name = "host"
 version = "0.0.0"
 source = "git+https://github.com/bytecodealliance/preview2-prototyping?rev=408f0bfcec31a1880b6df06341f996e8e445a442#408f0bfcec31a1880b6df06341f996e8e445a442"
 dependencies = [
-    "anyhow",
-    "async-trait",
-    "cap-rand",
-    "cap-std",
-    "clap",
-    "thiserror",
-    "tokio",
-    "tracing",
-    "wasi-cap-std-sync",
+ "anyhow",
+ "async-trait",
+ "cap-rand",
+ "cap-std",
+ "clap",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "wasi-cap-std-sync",
  "wasi-common",
  "wasmtime",
 ]
@@ -1013,6 +1013,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ac9a59f73473f1b8d852421e59e64809f025994837ef743615c6d0c5b305160"
 
 [[package]]
+name = "plugin-utils"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1031,6 +1038,7 @@ dependencies = [
 name = "proxy"
 version = "0.1.0"
 dependencies = [
+ "plugin-utils",
  "serde",
  "serde_yaml",
  "tracing",
@@ -1184,6 +1192,7 @@ dependencies = [
  "deadpool",
  "futures-util",
  "host",
+ "libc",
  "serde",
  "serde_yaml",
  "tap",
@@ -1646,15 +1655,15 @@ name = "wasi-cap-std-sync"
 version = "0.0.0"
 source = "git+https://github.com/bytecodealliance/preview2-prototyping?rev=408f0bfcec31a1880b6df06341f996e8e445a442#408f0bfcec31a1880b6df06341f996e8e445a442"
 dependencies = [
-    "anyhow",
-    "async-trait",
-    "cap-fs-ext",
-    "cap-rand",
-    "cap-std",
-    "cap-time-ext",
-    "fs-set-times",
-    "io-extras",
-    "io-lifetimes",
+ "anyhow",
+ "async-trait",
+ "cap-fs-ext",
+ "cap-rand",
+ "cap-std",
+ "cap-time-ext",
+ "fs-set-times",
+ "io-extras",
+ "io-lifetimes",
  "ipnet",
  "is-terminal",
  "once_cell",
@@ -1670,15 +1679,15 @@ name = "wasi-common"
 version = "0.0.0"
 source = "git+https://github.com/bytecodealliance/preview2-prototyping?rev=408f0bfcec31a1880b6df06341f996e8e445a442#408f0bfcec31a1880b6df06341f996e8e445a442"
 dependencies = [
-    "anyhow",
-    "async-trait",
-    "bitflags",
-    "cap-fs-ext",
-    "cap-rand",
-    "cap-std",
-    "io-extras",
-    "ipnet",
-    "rustix",
+ "anyhow",
+ "async-trait",
+ "bitflags",
+ "cap-fs-ext",
+ "cap-rand",
+ "cap-std",
+ "io-extras",
+ "ipnet",
+ "rustix",
  "system-interface",
  "thiserror",
  "tracing",
