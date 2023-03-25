@@ -7,17 +7,33 @@ interface plugin {
     variant action {
         responed(list<u8>),
         next(option<list<u8>>)
-    }
+  }
 
-    run: func() -> result<action, error>
+  run: func() -> result<action, error>
 }
 
 interface helper {
-    dns-packet: func() -> list<u8>
-    load-config: func() -> string
+  dns-packet: func() -> list<u8>
+  load-config: func() -> string
+}
+
+interface udp-helper {
+  record addr {
+    addr: u32,
+    port: u16,
+  }
+
+  bind: func(addr: addr) -> result<u32, u32>
+  connect: func(fd: u32, addr: addr) -> result<_, u32>
+  send: func(fd: u32, buf: list<u8>) -> result<u64, u32>
+  recv: func(fd: u32, buf-size: u64) -> result<list<u8>, u32>
+  send-to: func(fd: u32, buf: list<u8>, addr: addr) -> result<u64, u32>
+  recv-from: func(fd: u32, buf-size: u64) -> result<tuple<list<u8>, addr>, u32>
+  close: func(fd: u32)
 }
 
 default world rubydns {
   import helper: self.helper
+  import udp-helper: self.udp-helper
   export plugin: self.plugin
 }
