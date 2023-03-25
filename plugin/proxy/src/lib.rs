@@ -15,9 +15,9 @@ struct Config {
 }
 
 #[derive(Debug)]
-struct Runner;
+struct ProxyRunner;
 
-impl Plugin for Runner {
+impl Plugin for ProxyRunner {
     fn run(dns_packet: Vec<u8>) -> Result<Vec<u8>, Error> {
         let config = load_config();
         let config: Config = serde_yaml::from_str(&config).map_err(|err| {
@@ -84,4 +84,4 @@ fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Vec<u8>, Erro
     Ok(data)
 }
 
-export_rubydns!(Runner);
+export_rubydns!(ProxyRunner);

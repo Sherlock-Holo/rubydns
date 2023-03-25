@@ -1,3 +1,7 @@
 [workspace]
-members = ["plugin/plugin-utils", "plugin/proxy", "rubydns"]
-
+members = [
+    "plugin/plugin-utils",
+    "plugin/proxy",
+    "plugin/cache",
+    "rubydns"
+]

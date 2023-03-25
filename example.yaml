@@ -3,6 +3,8 @@ plugin_dir: target
 servers:
   - listen_addr: 127.0.0.1:8866
     plugins:
+      - name: cache
+
       - name: proxy
         nameservers:
           - 119.29.29.29:53

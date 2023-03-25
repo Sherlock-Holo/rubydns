@@ -12,6 +12,9 @@ interface helper {
 
   load-config: func() -> string
   call-next-plugin: func(dns-packet: list<u8>) -> option<result<list<u8>, error>>
+  map-set: func(key: list<u8>, value: list<u8>, timeout: option<u64>)
+  map-get: func(key: list<u8>) -> option<list<u8>>
+  map-remove: func(key: list<u8>)
 }
 
 interface udp-helper {
