@@ -46,6 +46,10 @@ impl Plugin for CacheRunner {
             Some(response_packet) => create_response_from_cache(&dns_packet, response_packet),
         }
     }
+
+    fn valid_config() -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 fn call_next_and_set_cache(dns_packet: &[u8], cache_key: Vec<u8>) -> Result<Vec<u8>, Error> {
@@ -80,7 +84,7 @@ fn create_response_from_cache(
     dns_packet: &[u8],
     response_packet: Vec<u8>,
 ) -> Result<Vec<u8>, Error> {
-    let mut request_message = Message::from_vec(dns_packet).map_err(|err| {
+    let request_message = Message::from_vec(dns_packet).map_err(|err| {
         error!(%err, "decode dns request packet failed");
 
         Error {
@@ -98,21 +102,23 @@ fn create_response_from_cache(
         }
     })?;
 
+    let mut request_message = request_message.into_parts();
+
     request_message
+        .header
         .set_message_type(MessageType::Response)
-        .set_response_code(response_message.response_code());
-
-    let mut header = *request_message.header();
-
-    header
+        .set_response_code(response_message.response_code())
         .set_answer_count(response_message.answer_count())
         .set_additional_count(response_message.additional_count())
         .set_authoritative(response_message.authoritative());
+    request_message
+        .answers
+        .extend_from_slice(response_message.answers());
+    request_message
+        .additionals
+        .extend_from_slice(response_message.additionals());
 
-    request_message.set_header(header);
-    request_message.add_answers(response_message.answers().iter().cloned());
-    request_message.add_additionals(response_message.additionals().iter().cloned());
-
+    let request_message = Message::from(request_message);
     let data = request_message.to_vec().map_err(|err| {
         error!(%err, "encode dns response packet failed");
 

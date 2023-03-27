@@ -2,6 +2,7 @@ interface plugin {
   use self.helper.{error}
 
   run: func(dns-packet: list<u8>) -> result<list<u8>, error>
+  valid-config: func() -> result<_, error>
 }
 
 interface helper {

@@ -41,6 +41,19 @@ impl Plugin for ProxyRunner {
             msg: "all nameserver failed".to_string(),
         })
     }
+
+    fn valid_config() -> Result<(), Error> {
+        serde_yaml::from_str::<Config>(&load_config()).map_err(|err| {
+            error!(%err, "load proxy config failed");
+
+            Error {
+                code: 1,
+                msg: err.to_string(),
+            }
+        })?;
+
+        Ok(())
+    }
 }
 
 fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Vec<u8>, Error> {

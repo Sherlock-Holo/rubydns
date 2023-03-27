@@ -52,13 +52,16 @@ impl PluginChain {
                 async move {
                     let raw_config = serde_yaml::to_string(&plugin_config.config)?;
                     let plugin_path = match plugin_config.plugin_path {
-                        None => plugin_dir.join(plugin_config.name + ".wasm"),
+                        None => plugin_dir.join(plugin_config.name.clone() + ".wasm"),
                         Some(plugin_path) => PathBuf::from(plugin_path + ".wasm"),
                     };
 
                     let plugin_binary = fs::read(&plugin_path).await?;
                     let plugin_pool =
-                        PluginPool::new(engine, plugin_binary.into(), raw_config, next_plugin);
+                        PluginPool::new(engine, plugin_binary.into(), raw_config, next_plugin)
+                            .await?;
+
+                    info!(plugin = %plugin_config.name, "create plugin pool done");
 
                     Ok::<_, anyhow::Error>(Some(plugin_pool))
                 }
@@ -77,8 +80,12 @@ impl PluginChain {
         mut dns_message: Message,
         dns_packet: Bytes,
     ) -> Result<(Message, Bytes), Error> {
+        info!("start get plugin");
+
         let mut obj = self.plugin.get_plugin().await.map_err(Error::PluginPool)?;
         let (plugin, store) = &mut *obj;
+
+        info!("get plugin done, start call plugin");
 
         let result = plugin
             .plugin()

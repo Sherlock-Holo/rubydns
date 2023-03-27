@@ -9,7 +9,7 @@ use deadpool::managed::{Pool, RecycleResult};
 use host::command;
 use tap::TapFallible;
 use thiserror::Error;
-use tracing::error;
+use tracing::{error, info};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
@@ -25,12 +25,12 @@ pub struct PluginPool {
 }
 
 impl PluginPool {
-    pub fn new(
+    pub async fn new(
         engine: Engine,
         plugin_binary: Bytes,
         raw_config: String,
         next_plugin: Option<PluginPool>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let pool = Pool::builder(Manager {
             engine,
             plugin_binary,
@@ -41,13 +41,42 @@ impl PluginPool {
         .build()
         .expect("build plugin pool failed");
 
-        Self { pool }
+        let plugin_pool = Self { pool };
+        plugin_pool.validate_config().await?;
+
+        info!(raw_config = %plugin_pool.pool.manager().raw_config, "plugin config valid");
+
+        Ok(plugin_pool)
     }
 
     pub async fn get_plugin(
         &self,
     ) -> anyhow::Result<impl DerefMut<Target = (Rubydns, Store<HostHelper>)> + '_> {
         Ok(self.pool.get().await?)
+    }
+
+    async fn validate_config(&self) -> anyhow::Result<()> {
+        let mut object = self
+            .pool
+            .get()
+            .await
+            .tap_err(|err| error!(%err, "get plugin failed"))?;
+        let (plugin, store) = &mut *object;
+
+        match plugin
+            .plugin()
+            .call_valid_config(store)
+            .await
+            .tap_err(|err| error!(%err, "call plugin valid config failed"))?
+        {
+            Err(err) => {
+                error!(?err, raw_config = %self.pool.manager().raw_config, "plugin config invalid");
+
+                Err(anyhow::anyhow!("plugin config invalid: {err:?}"))
+            }
+
+            Ok(()) => Ok(()),
+        }
     }
 }
 
