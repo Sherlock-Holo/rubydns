@@ -15,6 +15,7 @@ use wasmtime::{Engine, Store};
 
 use super::helper;
 use super::host_helper::HostHelper;
+use super::tcp_helper;
 use super::udp_helper;
 use super::Rubydns;
 use crate::plugins::host_helper::StoreValue;
@@ -120,6 +121,8 @@ impl managed::Manager for Manager {
             .tap_err(|err| error!(%err, "command add to linker failed"))?;
         udp_helper::add_to_linker(&mut linker, |state: &mut HostHelper| state.udp_helper())
             .tap_err(|err| error!(%err, "udp_helper add to linker failed"))?;
+        tcp_helper::add_to_linker(&mut linker, |state: &mut HostHelper| state.tcp_helper())
+            .tap_err(|err| error!(%err, "tcp_helper add to linker failed"))?;
 
         let component = Component::new(&self.engine, &self.plugin_binary)?;
         let (plugin, _) = Rubydns::instantiate_async(&mut store, &component, &linker).await?;

@@ -33,8 +33,21 @@ interface udp-helper {
   close: func(fd: u32)
 }
 
+interface tcp-helper {
+  use self.udp-helper.{addr}
+
+  bind: func(addr: addr) -> result<u32, u32>
+  accept: func(fd: u32) -> result<tuple<u32, addr>, u32>
+  connect: func(addr: addr) -> result<u32, u32>
+  write: func(fd: u32, buf: list<u8>) -> result<u64, u32>
+  flush: func(fd: u32) -> result<_, u32>
+  read: func(fd: u32, buf-size: u64) -> result<list<u8>, u32>
+  close: func(fd: u32)
+}
+
 default world rubydns {
   import helper: self.helper
   import udp-helper: self.udp-helper
+  import tcp-helper: self.tcp-helper
   export plugin: self.plugin
 }

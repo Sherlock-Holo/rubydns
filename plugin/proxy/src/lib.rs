@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use plugin_utils::UdpSocket;
+use plugin_utils::net::udp::UdpSocket;
 use serde::Deserialize;
 use tracing::error;
 
@@ -85,7 +85,7 @@ fn handle_dns(dns_packet: &[u8], nameserver: SocketAddr) -> Result<Vec<u8>, Erro
         }
     })?;
 
-    let data = udp_socket.recv(4096).map_err(|err| {
+    let data = udp_socket.recv_size(4096).map_err(|err| {
         error!(%err, %nameserver, "recv dns packet failed");
 
         Error {
