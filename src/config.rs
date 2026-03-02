@@ -2,14 +2,15 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::thread;
 use std::time::Duration;
 
 use humantime_serde::Serde;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_workers_config")]
     pub workers: WorkersConfig,
     pub proxy: Vec<Proxy>,
     pub backend: Vec<Backend>,
@@ -36,18 +37,32 @@ pub struct Proxy {
     pub retry_attempts: Option<NonZeroUsize>,
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
-#[serde(untagged, rename_all = "snake_case")]
+#[derive(Debug, Default, Clone)]
 pub enum WorkersConfig {
     #[default]
     Auto,
     Count(usize),
 }
 
+fn deserialize_workers_config<'de, D>(deserializer: D) -> Result<WorkersConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = <String>::deserialize(deserializer)?;
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(WorkersConfig::Auto);
+    }
+
+    value
+        .parse::<usize>()
+        .map_err(de::Error::custom)
+        .map(WorkersConfig::Count)
+}
+
 impl WorkersConfig {
     pub fn count(&self) -> usize {
         match self {
-            WorkersConfig::Auto => std::thread::available_parallelism()
+            WorkersConfig::Auto => thread::available_parallelism()
                 .map(|p| p.get())
                 .unwrap_or(4),
             WorkersConfig::Count(n) => (*n).max(1),
