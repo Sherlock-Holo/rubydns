@@ -9,6 +9,7 @@ use rand::rng;
 use tracing::instrument;
 
 use super::{Backend, DnsResponseWrapper};
+use crate::utils::TimeoutExt;
 
 #[derive(Debug)]
 pub struct UdpBackend {
@@ -46,7 +47,11 @@ impl UdpBackend {
         udp_socket.send(request.to_vec()?).await.0?;
 
         let buf = vec![0; 4096];
-        let res = udp_socket.recv(buf).await;
+        let res = if let Some(timeout) = self.timeout {
+            udp_socket.recv(buf).timeout(timeout).await?
+        } else {
+            udp_socket.recv(buf).await
+        };
         res.0?;
         let data = res.1;
 
