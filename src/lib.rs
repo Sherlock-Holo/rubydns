@@ -21,6 +21,8 @@ use futures_util::{FutureExt, TryStreamExt, select};
 use hickory_proto26::op::{Message, Query};
 use hickory_proto26::rr::{Name, RData, RecordType};
 use itertools::Itertools;
+use nix::sys::signal;
+use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tower::Layer;
@@ -103,6 +105,9 @@ pub struct Args {
 pub async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    // Must block process signals before any subsystem may spawn background threads.
+    block_signal()?;
+
     let _guard = init_log(
         args.log_level,
         args.otel_endpoint,
@@ -148,8 +153,11 @@ async fn collect_backends(
     let mut backends = HashMap::with_capacity(cfg_backends.len());
     for backend in cfg_backends {
         let name = &backend.name;
+        let backend_type = backend.backend_detail.backend_type();
         if backends.contains_key(name) {
-            return Err(anyhow::anyhow!("backend '{name}' already exists"));
+            return Err(anyhow::anyhow!(
+                "{backend_type} backend '{name}' already exists"
+            ));
         }
 
         let backend: Rc<dyn DynBackend> = match &backend.backend_detail {
@@ -208,6 +216,8 @@ async fn collect_backends(
             }
         };
 
+        info!("create {backend_type} backend '{name}' done");
+
         backends.insert(name.to_string(), backend);
     }
 
@@ -225,6 +235,8 @@ async fn collect_backends(
             .try_collect()?;
 
         let group = Group::new(grouped_backends);
+
+        info!("create group backend '{name}' done");
 
         backends.insert(name.to_string(), Rc::new(group));
     }
@@ -409,7 +421,12 @@ fn spawn_proxy_workers(
             let runtime = builder.with_proactor(proactor_builder).build().unwrap();
 
             runtime.block_on(async move {
-                let backends = collect_backends(&backend_configs).await?;
+                let backends = select! {
+                    _ = shutdown.notified().fuse() => {
+                        return Ok(());
+                    }
+                    res = collect_backends(&backend_configs).fuse() => res?,
+                };
                 let mut servers = FuturesUnordered::new();
 
                 for proxy in proxy_configs.iter().cloned() {
@@ -679,4 +696,14 @@ fn load_certificates_from_pem(path: &str) -> anyhow::Result<Vec<CertificateDer<'
 
 fn load_private_key_from_file(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
     Ok(PrivateKeyDer::from_pem_file(path)?)
+}
+
+fn block_signal() -> anyhow::Result<()> {
+    let mut sig_set = SigSet::empty();
+    sig_set.add(Signal::SIGINT);
+    sig_set.add(Signal::SIGTERM);
+
+    signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&sig_set), None)?;
+
+    Ok(())
 }

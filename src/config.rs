@@ -138,6 +138,20 @@ pub enum BackendDetail {
     Group(GroupBackend),
 }
 
+impl BackendDetail {
+    pub fn backend_type(&self) -> &'static str {
+        match self {
+            BackendDetail::Tls(_) => "tls",
+            BackendDetail::Udp(_) => "udp",
+            BackendDetail::Https(_) => "https",
+            BackendDetail::H3(_) => "h3",
+            BackendDetail::Quic(_) => "quic",
+            BackendDetail::StaticFile(_) => "static_file",
+            BackendDetail::Group(_) => "group",
+        }
+    }
+}
+
 /// Configuration for static file backend (used for deserialization)
 #[derive(Debug, Deserialize, Clone)]
 pub struct StaticFileBackend {
