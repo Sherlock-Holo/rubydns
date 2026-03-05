@@ -17,6 +17,7 @@ cyper = { version = "0.8.1", default-features = false, features = ["http2", "htt
 cyper-axum = { version = "0.8.0", features = ["http2"] }
 deadpool = "0.13.0"
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
+flume = "0.12.0"
 futures-util = "0.3.32"
 hickory-proto26 = { package = "hickory-proto", version = "0.26.0-alpha.1", git = "https://github.com/hickory-dns/hickory-dns/" }
 humantime-serde = "1.1.1"

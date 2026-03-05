@@ -16,8 +16,9 @@ use compio::driver::Proactor;
 use compio::net::{TcpListener, UdpSocket};
 use compio::runtime;
 use compio::runtime::Runtime;
+use flume::Receiver;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{FutureExt, TryStreamExt, select};
+use futures_util::{FutureExt, StreamExt, TryStreamExt, select};
 use hickory_proto26::op::{Message, Query};
 use hickory_proto26::rr::{Name, RData, RecordType};
 use itertools::Itertools;
@@ -125,22 +126,29 @@ pub async fn run() -> anyhow::Result<()> {
     info!(config = %args.config, "edns-proxy config loaded");
 
     let workers = workers.count();
-    let (join_handles, shutdown_notify, shutdown_waiters) =
+    let (shutdown_notify, shutdown_waiters, worker_result_rx) =
         spawn_proxy_workers(proxy, backend, workers)?;
 
     info!(workers, "proxy workers started");
 
-    signal_stop().await?;
+    let mut worker_results = worker_result_rx.into_stream();
 
-    info!("shutdown signal received, stopping proxy workers");
+    select! {
+        res = signal_stop().fuse() => {
+            res?;
 
-    if let Some(waiters) = NonZeroUsize::new(shutdown_waiters) {
-        shutdown_notify.notify_n(waiters);
-    }
-    for handle in join_handles {
-        if let Err(err) = handle.join().unwrap() {
-            error!(%err, "worker thread failed");
+            info!("shutdown signal received, stopping proxy workers");
+
+            shutdown_notify.notify_n(NonZeroUsize::new(shutdown_waiters).unwrap());
         }
+
+        res = worker_results.next() => {
+            res.unwrap()?;
+        }
+    }
+
+    while let Some(res) = worker_results.next().await {
+        res?;
     }
 
     Ok(())
@@ -388,19 +396,15 @@ fn create_tcp_listener_reuse_port(addr: SocketAddr) -> anyhow::Result<TcpListene
     TcpListener::from_std(std_listener).map_err(Into::into)
 }
 
-type SpawnResult = (
-    Vec<thread::JoinHandle<anyhow::Result<()>>>,
-    Arc<Notify>,
-    usize,
-);
+type SpawnResult = (Arc<Notify>, usize, Receiver<anyhow::Result<()>>);
 
 fn spawn_proxy_workers(
     proxy_configs: Vec<Proxy>,
     backend_configs: Vec<config::Backend>,
     threads: usize,
 ) -> anyhow::Result<SpawnResult> {
-    let mut join_handles = Vec::new();
     let shutdown_notify = Arc::new(Notify::new());
+    let (worker_result_tx, worker_result_rx) = flume::unbounded();
     let proxy_configs = Arc::<[Proxy]>::from(proxy_configs);
     let backend_configs = Arc::<[config::Backend]>::from(backend_configs);
     let shutdown_waiters = threads * proxy_configs.len();
@@ -409,8 +413,9 @@ fn spawn_proxy_workers(
         let shutdown = shutdown_notify.clone();
         let backend_configs = backend_configs.clone();
         let proxy_configs = proxy_configs.clone();
+        let worker_result_tx = worker_result_tx.clone();
 
-        let handle = thread::spawn(move || {
+        thread::spawn(move || {
             let mut builder = Runtime::builder();
             let mut proactor_builder = Proactor::builder();
             proactor_builder
@@ -420,7 +425,7 @@ fn spawn_proxy_workers(
 
             let runtime = builder.with_proactor(proactor_builder).build().unwrap();
 
-            runtime.block_on(async move {
+            let run_result = runtime.block_on(async move {
                 let backends = select! {
                     _ = shutdown.notified().fuse() => {
                         return Ok(());
@@ -496,13 +501,13 @@ fn spawn_proxy_workers(
                 }
 
                 Err(anyhow::anyhow!("proxy worker stop unexpectedly"))
-            })
-        });
+            });
 
-        join_handles.push(handle);
+            let _ = worker_result_tx.send(run_result);
+        });
     }
 
-    Ok((join_handles, shutdown_notify, shutdown_waiters))
+    Ok((shutdown_notify, shutdown_waiters, worker_result_rx))
 }
 
 fn filter_backend(filter: Vec<Filter>, backend: Rc<dyn DynBackend>) -> Rc<dyn DynBackend> {
