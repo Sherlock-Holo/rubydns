@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use hickory_proto26::op::{DnsResponse, Message, ResponseCode};
+use hickory_proto26::op::{Message, ResponseCode};
 use hickory_proto26::rr::{Name, RData, Record, RecordType};
 use tracing::{info, instrument};
 
-use super::{Backend, DnsResponseWrapper};
+use super::Backend;
 use crate::config::StaticFileBackendConfig;
 
 const DEFAULT_TTL: u32 = 3600; // 1 hour
@@ -79,7 +79,7 @@ impl StaticFileBackend {
     }
 
     #[instrument(skip(self), ret(Display), fields(message = %message), err)]
-    fn lookup_and_build_response(&self, message: Message) -> anyhow::Result<DnsResponseWrapper> {
+    fn lookup_and_build_response(&self, message: Message) -> anyhow::Result<Message> {
         let query = message
             .queries()
             .first()
@@ -108,9 +108,7 @@ impl StaticFileBackend {
             response.set_response_code(ResponseCode::NXDomain);
         }
 
-        DnsResponse::from_message(response)
-            .map(Into::into)
-            .map_err(Into::into)
+        Ok(response)
     }
 
     fn lookup_ips(&self, query_name: Name, query_type: RecordType) -> Option<Vec<RData>> {
@@ -163,11 +161,7 @@ fn normalize_domain_str(input: &mut str) -> &str {
 }
 
 impl Backend for StaticFileBackend {
-    async fn send_request(
-        &self,
-        message: Message,
-        _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    async fn send_request(&self, message: Message, _src: SocketAddr) -> anyhow::Result<Message> {
         self.lookup_and_build_response(message)
     }
 }

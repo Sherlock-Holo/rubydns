@@ -3,12 +3,12 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use compio::net::UdpSocket;
-use hickory_proto26::op::{DnsRequest, DnsRequestOptions, DnsResponse, Message};
+use hickory_proto26::op::{DnsRequest, DnsRequestOptions, Message};
 use rand::prelude::*;
 use rand::rng;
 use tracing::instrument;
 
-use super::{Backend, DnsResponseWrapper};
+use super::Backend;
 use crate::utils::TimeoutExt;
 
 #[derive(Debug)]
@@ -23,7 +23,7 @@ impl UdpBackend {
     }
 
     #[instrument(skip(self), ret(Display), fields(message = %message), err)]
-    async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponseWrapper> {
+    async fn do_send(&self, message: Message) -> anyhow::Result<Message> {
         let id = message.id();
 
         let addr = self
@@ -57,20 +57,16 @@ impl UdpBackend {
         res.0?;
         let data = res.1;
 
-        let mut dns_response = DnsResponse::from_buffer(data)?;
-        dns_response.set_id(id);
+        let mut message = Message::from_vec(&data)?;
+        message.set_id(id);
 
-        Ok(dns_response.into())
+        Ok(message)
     }
 }
 
 impl Backend for UdpBackend {
     #[instrument(skip(self), ret(Display), fields(message = %message), err)]
-    async fn send_request(
-        &self,
-        message: Message,
-        _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    async fn send_request(&self, message: Message, _src: SocketAddr) -> anyhow::Result<Message> {
         let r = self.do_send(message.clone()).await;
         if r.is_ok() {
             return r;
@@ -94,7 +90,7 @@ mod tests {
             Duration::from_secs(5).into(),
         );
 
-        let dns_response = backend
+        let response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
@@ -102,6 +98,6 @@ mod tests {
             .await
             .unwrap();
 
-        check_dns_response(&dns_response);
+        check_dns_response(&response);
     }
 }

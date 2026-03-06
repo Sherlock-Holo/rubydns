@@ -6,7 +6,7 @@ use std::rc::Rc;
 use hickory_proto26::op::Message;
 use tracing::instrument;
 
-use super::{Backend, DnsResponseWrapper, DynBackend};
+use super::{Backend, DynBackend};
 use crate::wrr::SmoothWeight;
 
 #[derive(Clone)]
@@ -38,11 +38,7 @@ impl Group {
 
 impl Backend for Group {
     #[instrument(skip(self), ret(Display), fields(message = %message), err)]
-    async fn send_request(
-        &self,
-        message: Message,
-        src: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<Message> {
         let backend = self
             .backends
             .borrow_mut()

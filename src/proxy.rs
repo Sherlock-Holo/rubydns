@@ -2,9 +2,9 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 
-use hickory_proto26::op::{DnsResponse, Message};
+use hickory_proto26::op::Message;
 
-use crate::backend::{Backend, DnsResponseWrapper, DynBackend};
+use crate::backend::{Backend, DynBackend};
 use crate::cache::Cache;
 use crate::route::Route;
 use crate::utils::retry;
@@ -33,11 +33,7 @@ impl ProxyBackend {
 }
 
 impl Backend for ProxyBackend {
-    async fn send_request(
-        &self,
-        message: Message,
-        src: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<Message> {
         let query = message
             .queries()
             .first()
@@ -49,7 +45,7 @@ impl Backend for ProxyBackend {
         {
             resp.set_id(message.id());
 
-            return Ok(resp.into());
+            return Ok(resp);
         }
 
         let backend = self
@@ -62,8 +58,7 @@ impl Backend for ProxyBackend {
         .await?;
 
         if let Some(cache) = &self.cache {
-            let dns_response: DnsResponse = response.clone().into();
-            cache.put_cache_response(query, src.ip(), dns_response);
+            cache.put_cache_response(query, src.ip(), response.clone());
         }
 
         Ok(response)

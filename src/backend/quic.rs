@@ -11,13 +11,13 @@ use compio::quic::crypto::rustls::QuicClientConfig;
 use compio::quic::{ClientConfig, Connection, Endpoint};
 use compio::runtime::JoinHandle;
 use compio::{BufResult, runtime, time};
-use hickory_proto26::op::{DnsResponse, Message};
+use hickory_proto26::op::Message;
 use rand::rng;
 use rand::seq::IteratorRandom;
 use rustls::RootCertStore;
 use tracing::{error, info, instrument};
 
-use super::{Backend, DnsResponseWrapper};
+use super::Backend;
 
 #[derive(Debug)]
 pub struct QuicBackend {
@@ -122,7 +122,7 @@ impl Backend for QuicBackend {
         &self,
         mut message: Message,
         _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    ) -> anyhow::Result<Message> {
         let id = message.id();
 
         // RFC: When sending queries over a QUIC connection, the DNS Message ID MUST be set to 0.
@@ -153,10 +153,10 @@ impl Backend for QuicBackend {
         let BufResult(res, resp_data) = rx.read_exact(Vec::with_capacity(resp_len as usize)).await;
         res?;
 
-        let mut dns_response = DnsResponse::from_buffer(resp_data)?;
-        dns_response.set_id(id);
+        let mut message = Message::from_vec(&resp_data)?;
+        message.set_id(id);
 
-        Ok(dns_response.into())
+        Ok(message)
     }
 }
 
@@ -178,7 +178,7 @@ mod tests {
         .await
         .unwrap();
 
-        let dns_response = backend
+        let response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
@@ -186,6 +186,6 @@ mod tests {
             .await
             .unwrap();
 
-        check_dns_response(&dns_response);
+        check_dns_response(&response);
     }
 }

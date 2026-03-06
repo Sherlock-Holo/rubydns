@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use compio::net::UdpSocket;
 use compio::runtime::{self, BufferPool};
-use hickory_proto26::op::{DnsResponse, Message, ResponseCode};
+use hickory_proto26::op::{Message, ResponseCode};
 use tracing::{debug, error, instrument};
 
 use crate::backend::DynBackend;
@@ -81,36 +81,21 @@ impl UdpServer {
         let response = match backend.dyn_send_request(message, src).await {
             Err(err) => {
                 error!(%err, "backend handle message failed");
-
-                let err_message = Message::error_msg(id, op_code, ResponseCode::ServFail);
-                match DnsResponse::from_message(err_message) {
-                    Err(err) => {
-                        error!(%err, "create dns response from err message failed");
-                        return;
-                    }
-
-                    Ok(response) => response.into(),
-                }
+                Message::error_msg(id, op_code, ResponseCode::ServFail)
             }
-
             Ok(response) => {
                 debug!(?response, "backend handle message done");
                 response
             }
         };
 
-        let mut data = response.into_buffer();
-        if data.len() >= 2 {
-            let id_bytes = id.to_be_bytes();
-            data[0] = id_bytes[0];
-            data[1] = id_bytes[1];
-        }
-        let response_id = if data.len() >= 2 {
-            u16::from_be_bytes([data[0], data[1]])
-        } else {
-            0
+        let data = match response.to_vec() {
+            Ok(d) => d,
+            Err(err) => {
+                error!(%err, "serialize dns response failed");
+                return;
+            }
         };
-        debug!(%src, request_id = id, response_id, "udp response about to send");
 
         if let Err(err) = udp_socket.send_to(data, src).await.0 {
             error!(%err, "send dns response failed");

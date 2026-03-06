@@ -6,13 +6,13 @@ use std::rc::Rc;
 use cyper::Client;
 use cyper::resolve::Resolve;
 use futures_util::{AsyncReadExt, Stream, TryStreamExt, stream};
-use hickory_proto26::op::{DnsRequest, DnsRequestOptions, DnsResponse, Message};
+use hickory_proto26::op::{DnsRequest, DnsRequestOptions, Message};
 use http::{StatusCode, Uri, Version};
 use rand::rng;
 use rand::seq::IteratorRandom;
 use tracing::{error, instrument};
 
-use super::{Backend, DnsResponseWrapper};
+use super::Backend;
 
 #[derive(Debug)]
 pub struct HttpsBackend {
@@ -38,11 +38,7 @@ impl HttpsBackend {
 
 impl Backend for HttpsBackend {
     #[instrument(skip(self), ret(Display), fields(message = %message), err)]
-    async fn send_request(
-        &self,
-        message: Message,
-        _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    async fn send_request(&self, message: Message, _src: SocketAddr) -> anyhow::Result<Message> {
         let id = message.id();
         let mut options = DnsRequestOptions::default();
         options.use_edns = true;
@@ -81,10 +77,10 @@ impl Backend for HttpsBackend {
         let mut buf = Vec::with_capacity(4096);
         resp_stream.read_to_end(&mut buf).await?;
 
-        let mut dns_response = DnsResponse::from_buffer(buf)?;
-        dns_response.set_id(id);
+        let mut message = Message::from_vec(&buf)?;
+        message.set_id(id);
 
-        Ok(dns_response.into())
+        Ok(message)
     }
 }
 
@@ -120,7 +116,7 @@ mod tests {
             false,
         );
 
-        let dns_response = backend
+        let response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
@@ -128,7 +124,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_dns_response(&dns_response);
+        check_dns_response(&response);
     }
 
     #[compio::test]
@@ -141,7 +137,7 @@ mod tests {
             true,
         );
 
-        let dns_response = backend
+        let response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
@@ -149,6 +145,6 @@ mod tests {
             .await
             .unwrap();
 
-        check_dns_response(&dns_response);
+        check_dns_response(&response);
     }
 }

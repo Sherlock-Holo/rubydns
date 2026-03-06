@@ -5,13 +5,11 @@ mod static_file;
 mod tls;
 mod udp;
 
-use std::fmt::{Debug, Display, Formatter};
 use std::net::SocketAddr;
-use std::ops::{Deref, DerefMut};
 
 use futures_util::FutureExt;
 use futures_util::future::LocalBoxFuture;
-use hickory_proto26::op::{DnsResponse, Message};
+use hickory_proto26::op::Message;
 
 pub use self::group::Group;
 pub use self::https::HttpsBackend;
@@ -21,62 +19,7 @@ pub use self::tls::TlsBackend;
 pub use self::udp::UdpBackend;
 
 pub trait Backend {
-    async fn send_request(
-        &self,
-        message: Message,
-        src: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper>;
-}
-
-#[derive(Clone)]
-pub struct DnsResponseWrapper(pub DnsResponse);
-
-impl DnsResponseWrapper {
-    pub fn into_inner(self) -> DnsResponse {
-        self.0
-    }
-
-    pub fn into_buffer(self) -> Vec<u8> {
-        self.0.into_buffer()
-    }
-}
-
-impl From<DnsResponse> for DnsResponseWrapper {
-    fn from(value: DnsResponse) -> Self {
-        DnsResponseWrapper(value)
-    }
-}
-
-impl From<DnsResponseWrapper> for DnsResponse {
-    fn from(value: DnsResponseWrapper) -> Self {
-        value.0
-    }
-}
-
-impl Deref for DnsResponseWrapper {
-    type Target = DnsResponse;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for DnsResponseWrapper {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Debug for DnsResponseWrapper {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        <Message as Debug>::fmt(&self.0, f)
-    }
-}
-
-impl Display for DnsResponseWrapper {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        <Message as Display>::fmt(&self.0, f)
-    }
+    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<Message>;
 }
 
 pub trait DynBackend {
@@ -84,7 +27,7 @@ pub trait DynBackend {
         &self,
         message: Message,
         src: SocketAddr,
-    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponseWrapper>>;
+    ) -> LocalBoxFuture<'_, anyhow::Result<Message>>;
 }
 
 impl<T: Backend> DynBackend for T {
@@ -92,7 +35,7 @@ impl<T: Backend> DynBackend for T {
         &self,
         message: Message,
         src: SocketAddr,
-    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponseWrapper>> {
+    ) -> LocalBoxFuture<'_, anyhow::Result<Message>> {
         self.send_request(message, src).boxed_local()
     }
 }
@@ -102,7 +45,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Once;
 
-    use hickory_proto26::op::{DnsResponse, Message, Query};
+    use hickory_proto26::op::{Message, Query};
     use hickory_proto26::rr::{Name, RData, RecordType};
 
     pub fn create_query_message() -> Message {
@@ -117,8 +60,8 @@ mod tests {
     }
 
     #[track_caller]
-    pub fn check_dns_response(dns_response: &DnsResponse) {
-        let answers = dns_response.answers();
+    pub fn check_dns_response(message: &Message) {
+        let answers = message.answers();
         dbg!(answers);
 
         assert!(answers.iter().any(|record| {

@@ -144,17 +144,13 @@ mod tests {
     use hickory_proto26::op::Message;
 
     use super::*;
-    use crate::backend::{Backend, DnsResponseWrapper};
+    use crate::backend::Backend;
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub struct TestBackend(pub usize);
 
     impl Backend for TestBackend {
-        async fn send_request(
-            &self,
-            _: Message,
-            _: SocketAddr,
-        ) -> anyhow::Result<DnsResponseWrapper> {
+        async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<Message> {
             panic!("just for test")
         }
     }

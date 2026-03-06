@@ -1,13 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::rc::Rc;
 
-use hickory_proto26::op::{Edns as Edns26, Message as Message26};
-use hickory_proto26::rr::rdata::opt::{
-    ClientSubnet as ClientSubnet26, EdnsCode as EdnsCode26, EdnsOption as EdnsOption26,
-};
+use hickory_proto26::op::{Edns, Message};
+use hickory_proto26::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
 use tower::Layer;
 
-use crate::backend::{Backend, DnsResponseWrapper, DynBackend};
+use crate::backend::{Backend, DynBackend};
 
 #[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct StaticEcsFilterLayer {
@@ -44,14 +42,10 @@ impl<B> Layer<B> for StaticEcsFilterLayer {
 }
 
 impl Backend for StaticEcsFilter<Rc<dyn DynBackend>> {
-    async fn send_request(
-        &self,
-        mut message: Message26,
-        src: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    async fn send_request(&self, mut message: Message, src: SocketAddr) -> anyhow::Result<Message> {
         let extensions = message.extensions_mut();
-        let opt = extensions.get_or_insert_with(Edns26::new).options_mut();
-        if opt.get(EdnsCode26::Subnet).is_none() {
+        let opt = extensions.get_or_insert_with(Edns::new).options_mut();
+        if opt.get(EdnsCode::Subnet).is_none() {
             let addr_and_prefix = match src.ip() {
                 IpAddr::V4(_) => self
                     .ipv4_prefix
@@ -62,7 +56,7 @@ impl Backend for StaticEcsFilter<Rc<dyn DynBackend>> {
             };
 
             if let Some((addr, prefix)) = addr_and_prefix {
-                opt.insert(EdnsOption26::Subnet(ClientSubnet26::new(addr, prefix, 0)));
+                opt.insert(EdnsOption::Subnet(ClientSubnet::new(addr, prefix, 0)));
             }
         }
 

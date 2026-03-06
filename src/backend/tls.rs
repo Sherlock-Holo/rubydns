@@ -8,14 +8,14 @@ use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::tls::{TlsConnector, TlsStream};
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
-use hickory_proto26::op::{DnsResponse, Message};
+use hickory_proto26::op::Message;
 use rand::rng;
 use rand::seq::IteratorRandom;
 use rustls::{ClientConfig, RootCertStore};
 use send_wrapper::SendWrapper;
 use tracing::{debug, instrument};
 
-use super::{Backend, DnsResponseWrapper};
+use super::Backend;
 
 #[derive(Debug)]
 pub struct TlsBackend {
@@ -24,11 +24,7 @@ pub struct TlsBackend {
 
 impl Backend for TlsBackend {
     #[instrument(skip(self), ret(Display), fields(message = %message), err)]
-    async fn send_request(
-        &self,
-        message: Message,
-        _: SocketAddr,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<Message> {
         let id = message.id();
         let request_data = message.to_vec()?;
         let mut tls_stream = self.pool.get().await?;
@@ -82,7 +78,7 @@ impl TlsBackend {
         &self,
         tls_stream: &mut TlsStream<TcpStream>,
         request_data: Vec<u8>,
-    ) -> anyhow::Result<DnsResponseWrapper> {
+    ) -> anyhow::Result<Message> {
         let request_len = (request_data.len() as u16).to_be_bytes();
 
         tls_stream.write_all(request_len).await.0?;
@@ -104,7 +100,7 @@ impl TlsBackend {
             .await;
         res?;
 
-        Ok(DnsResponse::from_buffer(resp_data)?.into())
+        Message::from_vec(&resp_data).map_err(Into::into)
     }
 }
 
@@ -157,7 +153,7 @@ mod tests {
         )
         .unwrap();
 
-        let dns_response = backend
+        let response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
@@ -165,6 +161,6 @@ mod tests {
             .await
             .unwrap();
 
-        check_dns_response(&dns_response);
+        check_dns_response(&response);
     }
 }

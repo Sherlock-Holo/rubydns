@@ -187,9 +187,12 @@ impl HttpsServer {
 
         let message = Message::from_vec(&body).with_context(|| "parse dns message failed")?;
 
-        let dns_response = SendWrapper::new(backend.dyn_send_request(message, src)).await?;
+        let response_message = SendWrapper::new(backend.dyn_send_request(message, src)).await?;
+        let body_bytes = response_message
+            .to_vec()
+            .with_context(|| "serialize dns response failed")?;
 
-        Ok(Response::new(Body::from(dns_response.into_buffer())))
+        Ok(Response::new(Body::from(body_bytes)))
     }
 
     pub async fn run(self) -> anyhow::Result<()> {

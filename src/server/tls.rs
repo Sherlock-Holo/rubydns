@@ -136,8 +136,10 @@ impl TlsServer {
         res.with_context(|| format!("read dns request with length {len} failed"))?;
 
         let message = Message::from_vec(&buf).with_context(|| "parse dns message failed")?;
-        let dns_response = backend.dyn_send_request(message, peer_addr).await?;
-        let response_data = dns_response.into_buffer();
+        let response_message = backend.dyn_send_request(message, peer_addr).await?;
+        let response_data = response_message
+            .to_vec()
+            .with_context(|| "serialize dns response failed")?;
 
         tls_stream
             .write_u16(response_data.len() as _)

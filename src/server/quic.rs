@@ -146,8 +146,10 @@ impl QuicServer {
         let message = Message::from_vec(&buf).with_context(|| "parse dns message failed")?;
 
         // Send request to backend
-        let dns_response = backend.dyn_send_request(message, peer_addr).await?;
-        let response_data = dns_response.into_buffer();
+        let response_message = backend.dyn_send_request(message, peer_addr).await?;
+        let response_data = response_message
+            .to_vec()
+            .with_context(|| "serialize dns response failed")?;
 
         // Send response length
         tx.write_u16(response_data.len() as _)

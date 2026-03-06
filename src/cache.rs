@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use cidr::IpInet;
-use hickory_proto26::op::{DnsResponse, Query};
+use hickory_proto26::op::{Message, Query};
 use quick_cache::sync::Cache as S3FifoCache;
 
 #[derive(Debug)]
@@ -22,7 +22,7 @@ impl Cache {
         }
     }
 
-    pub fn get_cache_response(&self, query: Query, src_ip: IpAddr) -> Option<DnsResponse> {
+    pub fn get_cache_response(&self, query: Query, src_ip: IpAddr) -> Option<Message> {
         let prefix = match src_ip {
             IpAddr::V4(_) => self.ipv4_prefix,
             IpAddr::V6(_) => self.ipv6_prefix,
@@ -31,7 +31,7 @@ impl Cache {
         self.get_response(query, ip_inet)
     }
 
-    pub fn put_cache_response(&self, query: Query, src_ip: IpAddr, response: DnsResponse) {
+    pub fn put_cache_response(&self, query: Query, src_ip: IpAddr, response: Message) {
         let prefix = match src_ip {
             IpAddr::V4(_) => self.ipv4_prefix,
             IpAddr::V6(_) => self.ipv6_prefix,
@@ -42,7 +42,7 @@ impl Cache {
         self.add_response(query, ip_inet, response);
     }
 
-    fn get_response(&self, query: Query, src_ip: IpInet) -> Option<DnsResponse> {
+    fn get_response(&self, query: Query, src_ip: IpInet) -> Option<Message> {
         let key = RequestKey { query, src_ip };
         let mut cache_resp = self.inner.get(&key)?;
         let elapsed = cache_resp.cache_time.elapsed().as_secs() as u32;
@@ -55,11 +55,11 @@ impl Cache {
             for answer in cache_resp.response.answers_mut() {
                 answer.set_ttl(ttl - elapsed);
             }
-            Some(cache_resp.response)
+            Some(cache_resp.response.clone())
         }
     }
 
-    fn add_response(&self, query: Query, src_ip: IpInet, response: DnsResponse) {
+    fn add_response(&self, query: Query, src_ip: IpInet, response: Message) {
         let ttl = match response.answers().iter().map(|record| record.ttl()).min() {
             None => return,
             Some(0) => return,
@@ -86,7 +86,7 @@ struct RequestKey {
 
 #[derive(Debug, Clone)]
 struct CacheResponse {
-    response: DnsResponse,
+    response: Message,
     ttl: u32,
     cache_time: Instant,
 }
