@@ -796,54 +796,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
-name = "edns_proxy"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "async-notify",
- "axum",
- "bytes",
- "cidr",
- "clap",
- "compio",
- "compio-quic",
- "cyper",
- "cyper-axum",
- "deadpool",
- "educe",
- "flume",
- "futures-util",
- "hickory-proto",
- "http",
- "http-body",
- "http-body-util",
- "humantime-serde",
- "itertools",
- "mimalloc",
- "nix",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "quick_cache",
- "rand 0.10.0",
- "rustls",
- "rustls-native-certs",
- "rustls-pemfile",
- "send_wrapper",
- "serde",
- "serde_yaml",
- "socket2",
- "tower",
- "tower-http",
- "tracing",
- "tracing-appender",
- "tracing-log",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "educe"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2017,6 +1969,54 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rubydns"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-notify",
+ "axum",
+ "bytes",
+ "cidr",
+ "clap",
+ "compio",
+ "compio-quic",
+ "cyper",
+ "cyper-axum",
+ "deadpool",
+ "educe",
+ "flume",
+ "futures-util",
+ "hickory-proto",
+ "http",
+ "http-body",
+ "http-body-util",
+ "humantime-serde",
+ "itertools",
+ "mimalloc",
+ "nix",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "quick_cache",
+ "rand 0.10.0",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "send_wrapper",
+ "serde",
+ "serde_yaml",
+ "socket2",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-appender",
+ "tracing-log",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

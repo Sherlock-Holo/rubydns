@@ -5,5 +5,5 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 #[compio::main]
 async fn main() -> anyhow::Result<()> {
-    edns_proxy::run().await
+    rubydns::run().await
 }
