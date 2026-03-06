@@ -79,6 +79,8 @@ const DEFAULT_RETRY_ATTEMPTS: NonZeroUsize = const {
     }
 };
 
+const DEFAULT_SERVER_IDLE: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Parser)]
 #[command(styles = STYLES)]
 pub struct Args {
@@ -251,8 +253,6 @@ async fn collect_backends(
 
     Ok(backends)
 }
-
-const DEFAULT_SERVER_IDLE: Duration = Duration::from_secs(30);
 
 async fn run_server_until_shutdown(
     bind_addr: BindAddr,
@@ -500,7 +500,7 @@ fn spawn_proxy_workers(
                     res?;
                 }
 
-                Err(anyhow::anyhow!("proxy worker stop unexpectedly"))
+                Ok(())
             });
 
             let _ = worker_result_tx.send(run_result);
