@@ -116,10 +116,11 @@ impl HttpsServer {
         path: String,
         backend: Rc<dyn DynBackend>,
     ) -> anyhow::Result<HttpsServer> {
-        let server_config = ServerConfig::builder()
+        let mut server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certificate, private_key)?;
 
+        server_config.alpn_protocols = vec![b"h2".to_vec()];
         let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
 
         Ok(Self {
@@ -139,9 +140,11 @@ impl HttpsServer {
         path: String,
         backend: Rc<dyn DynBackend>,
     ) -> anyhow::Result<HttpsServer> {
-        let server_config = ServerConfig::builder()
+        let mut server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certificate, private_key)?;
+
+        server_config.alpn_protocols = vec![b"h3".to_vec()];
         let quic_server_config = QuicServerConfig::try_from(server_config)?;
         let endpoint = Endpoint::new(
             udp_socket,
