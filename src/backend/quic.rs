@@ -123,6 +123,8 @@ impl Backend for QuicBackend {
         mut message: Message,
         _src: SocketAddr,
     ) -> anyhow::Result<DnsResponseWrapper> {
+        let id = message.id();
+
         // RFC: When sending queries over a QUIC connection, the DNS Message ID MUST be set to 0.
         // The stream mapping for DoQ allows for unambiguous correlation of queries and responses,
         // so the Message ID field is not required.
@@ -151,7 +153,10 @@ impl Backend for QuicBackend {
         let BufResult(res, resp_data) = rx.read_exact(Vec::with_capacity(resp_len as usize)).await;
         res?;
 
-        Ok(DnsResponse::from_buffer(resp_data)?.into())
+        let mut dns_response = DnsResponse::from_buffer(resp_data)?;
+        dns_response.set_id(id);
+
+        Ok(dns_response.into())
     }
 }
 

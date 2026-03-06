@@ -24,6 +24,8 @@ impl UdpBackend {
 
     #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponseWrapper> {
+        let id = message.id();
+
         let addr = self
             .addrs
             .iter()
@@ -55,7 +57,10 @@ impl UdpBackend {
         res.0?;
         let data = res.1;
 
-        Ok(DnsResponse::from_buffer(data)?.into())
+        let mut dns_response = DnsResponse::from_buffer(data)?;
+        dns_response.set_id(id);
+
+        Ok(dns_response.into())
     }
 }
 

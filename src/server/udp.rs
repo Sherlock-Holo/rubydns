@@ -99,7 +99,18 @@ impl UdpServer {
             }
         };
 
-        let data = response.into_buffer();
+        let mut data = response.into_buffer();
+        if data.len() >= 2 {
+            let id_bytes = id.to_be_bytes();
+            data[0] = id_bytes[0];
+            data[1] = id_bytes[1];
+        }
+        let response_id = if data.len() >= 2 {
+            u16::from_be_bytes([data[0], data[1]])
+        } else {
+            0
+        };
+        debug!(%src, request_id = id, response_id, "udp response about to send");
 
         if let Err(err) = udp_socket.send_to(data, src).await.0 {
             error!(%err, "send dns response failed");

@@ -45,8 +45,10 @@ impl Backend for ProxyBackend {
             .ok_or_else(|| anyhow::anyhow!("no query found"))?;
 
         if let Some(cache) = &self.cache
-            && let Some(resp) = cache.get_cache_response(query.clone(), src.ip())
+            && let Some(mut resp) = cache.get_cache_response(query.clone(), src.ip())
         {
+            resp.set_id(message.id());
+
             return Ok(resp.into());
         }
 

@@ -29,6 +29,7 @@ impl Backend for TlsBackend {
         message: Message,
         _: SocketAddr,
     ) -> anyhow::Result<DnsResponseWrapper> {
+        let id = message.id();
         let request_data = message.to_vec()?;
         let mut tls_stream = self.pool.get().await?;
 
@@ -39,7 +40,11 @@ impl Backend for TlsBackend {
                 Err(err)
             }
 
-            Ok(resp) => Ok(resp),
+            Ok(mut resp) => {
+                resp.set_id(id);
+
+                Ok(resp)
+            }
         }
     }
 }

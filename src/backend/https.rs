@@ -43,6 +43,7 @@ impl Backend for HttpsBackend {
         message: Message,
         _src: SocketAddr,
     ) -> anyhow::Result<DnsResponseWrapper> {
+        let id = message.id();
         let mut options = DnsRequestOptions::default();
         options.use_edns = true;
         let request = DnsRequest::new(message, options);
@@ -80,7 +81,10 @@ impl Backend for HttpsBackend {
         let mut buf = Vec::with_capacity(4096);
         resp_stream.read_to_end(&mut buf).await?;
 
-        Ok(DnsResponse::from_buffer(buf)?.into())
+        let mut dns_response = DnsResponse::from_buffer(buf)?;
+        dns_response.set_id(id);
+
+        Ok(dns_response.into())
     }
 }
 
