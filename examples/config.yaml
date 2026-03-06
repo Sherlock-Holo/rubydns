@@ -1,104 +1,128 @@
 workers: auto
 
 proxy:
-  # - type: udp
-  #   bind_addr: 127.0.0.1:5353
-  #   timeout: 20s
-  #   backend: dot-pub
+  - type: udp
+    bind_addr: 127.0.0.1:5353
+    timeout: 20s
+    backend: dot-pub
 
-  # - type: udp
-  #   bind_addr: 127.0.0.1:5454
-  #   timeout: 20s
-  #   backend: doh-pub
-  #   filter:
-  #     - type: edns_client_subnet
-  #       ipv4_prefix: 15
-  #       ipv6_prefix: 56
+  - type: udp
+    bind_addr: 127.0.0.1:5454
+    timeout: 20s
+    backend: doh-pub
+    filter:
+      - type: edns_client_subnet
+        ipv4_prefix: 15
+        ipv6_prefix: 56
 
-  # - type: udp
-  #   bind_addr: 127.0.0.1:5555
-  #   timeout: 20s
-  #   backend: udp
-  #   filter:
-  #     - type: edns_client_subnet
-  #       ipv4_prefix: 15
-  #       ipv6_prefix: 56
+  - type: udp
+    bind_addr: 127.0.0.1:5555
+    timeout: 20s
+    backend: udp
+    filter:
+      - type: edns_client_subnet
+        ipv4_prefix: 15
+        ipv6_prefix: 56
 
-  # - type: udp
-  #   bind_addr: 127.0.0.1:5656
-  #   timeout: 20s
-  #   backend: h3
-  #   filter:
-  #     - type: edns_client_subnet
-  #       ipv4_prefix: 15
-  #       ipv6_prefix: 56
+  - type: udp
+    bind_addr: 127.0.0.1:5656
+    timeout: 20s
+    backend: h3
+    filter:
+      - type: edns_client_subnet
+        ipv4_prefix: 15
+        ipv6_prefix: 56
 
-  # - type: udp
-  #   bind_addr: 127.0.0.1:5757
-  #   timeout: 20s
-  #   backend: quic
-  #   filter:
-  #     - type: edns_client_subnet
-  #       ipv4_prefix: 15
-  #       ipv6_prefix: 56
+  #  - type: udp
+  #    bind_addr: 127.0.0.1:5757
+  #    timeout: 20s
+  #    backend: quic
+  #    filter:
+  #      - type: edns_client_subnet
+  #        ipv4_prefix: 15
+  #        ipv6_prefix: 56
 
-  # - type: udp
-  #   bind_addr: 127.0.0.1:5858
-  #   timeout: 20s
-  #   backend: doh-pub
-  #   filter:
-  #     - type: edns_client_subnet
-  #       ipv4_prefix: 15
-  #       ipv6_prefix: 56
-  #   cache:
-  #     capacity: 10
-  #     ipv4_prefix: 15
-  #     ipv6_prefix: 48
-  #   route:
-  #     - type: dnsmasq
-  #       path: examples/dnsmasq.conf
-  #       backend: dot-pub
-  #       filter:
-  #         - type: edns_client_subnet
-  #           ipv4_prefix: 24
-  #           ipv6_prefix: 96
+  - type: udp
+    bind_addr: 127.0.0.1:5858
+    timeout: 20s
+    backend: doh-pub
+    filter:
+      - type: edns_client_subnet
+        ipv4_prefix: 15
+        ipv6_prefix: 56
+    cache:
+      capacity: 10
+      ipv4_prefix: 15
+      ipv6_prefix: 48
+    route:
+      - type: dnsmasq
+        path: examples/dnsmasq.conf
+        backend: dot-pub
+        filter:
+          - type: edns_client_subnet
+            ipv4_prefix: 24
+            ipv6_prefix: 96
 
-  #     - type: normal
-  #       path: examples/normal.conf
-  #       backend: h3
+      - type: normal
+        path: examples/normal.conf
+        backend: h3
 
-  # - type: udp
-  #   bind_addr: 127.0.0.1:5959
-  #   timeout: 20s
-  #   backend: group-pub
+  - type: udp
+    bind_addr: 127.0.0.1:5959
+    timeout: 20s
+    backend: group-pub
 
-  # - type: https
-  #   bind_domain: test
-  #   private_key: examples/test.key
-  #   certificate: examples/test.crt
-  #   bind_addr: 127.0.0.1:4343
-  #   timeout: 20s
-  #   backend: dot-pub
-  #   filter:
-  #     - type: edns_client_subnet
-  #       ipv4_prefix: 15
-  #       ipv6_prefix: 56
+  - type: https
+    bind_domain: test
+    private_key: examples/localhost.key
+    certificate: examples/localhost.crt
+    bind_addr: 127.0.0.1:4343
+    timeout: 20s
+    backend: dot-pub
+    filter:
+      - type: edns_client_subnet
+        ipv4_prefix: 15
+        ipv6_prefix: 56
 
-  # - type: tls
-  #   bind_tls_name: test
-  #   private_key: examples/test.key
-  #   certificate: examples/test.crt
-  #   bind_addr: 127.0.0.1:8853
-  #   timeout: 20s
-  #   backend: doh-pub
-  #   filter:
-  #     - type: static_edns_client_subnet
-  #       ipv4:
-  #         ip: 10.10.0.1
-  #         prefix: 16
-  #       ipv6:
-  #         ip: 2001:da8::1
-  #         prefix: 64
+  - type: h3
+    bind_domain: test
+    private_key: examples/localhost.key
+    certificate: examples/localhost.crt
+    bind_addr: 127.0.0.1:4343
+    timeout: 20s
+    backend: dot-pub
+    filter:
+      - type: edns_client_subnet
+        ipv4_prefix: 15
+        ipv6_prefix: 56
+
+  - type: quic
+    tls_name: test
+    private_key: examples/localhost.key
+    certificate: examples/localhost.crt
+    bind_addr: 127.0.0.1:8854
+    timeout: 20s
+    backend: dot-pub
+    filter:
+      - type: edns_client_subnet
+        ipv4_prefix: 15
+        ipv6_prefix: 56
+
+  - type: tls
+    tls_name: test
+    private_key: examples/localhost.key
+    certificate: examples/localhost.crt
+    bind_addr: 127.0.0.1:8853
+    timeout: 20s
+    backend: doh-pub
+    filter:
+      - type: static_edns_client_subnet
+        ipv4:
+          ip: 10.10.0.1
+          prefix: 16
+        ipv6:
+          ip: 2001:da8::1
+          prefix: 64
 
   - type: udp
     bind_addr: 127.0.0.1:6060
@@ -128,12 +152,12 @@ backend:
     url: https://dns.nextdns.io/dns-query
     ips:
       - 45.90.28.1
-
-  - name: quic
-    type: quic
-    tls_name: dns.alidns.com
-    bootstrap:
-      - 119.29.29.29:53
+  #
+  #  - name: quic
+  #    type: quic
+  #    tls_name: dns.alidns.com
+  #    bootstrap:
+  #      - 119.29.29.29:53
 
   - name: group-pub
     type: group
