@@ -23,7 +23,7 @@ pub struct TlsBackend {
 }
 
 impl Backend for TlsBackend {
-    #[instrument(skip(self), ret(Display), err)]
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     async fn send_request(
         &self,
         message: Message,

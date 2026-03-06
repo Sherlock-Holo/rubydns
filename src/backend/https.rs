@@ -37,7 +37,7 @@ impl HttpsBackend {
 }
 
 impl Backend for HttpsBackend {
-    #[instrument(skip(self), ret(Display), err)]
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     async fn send_request(
         &self,
         message: Message,

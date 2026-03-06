@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::BytesMut;
+use compio::buf::{IntoInner, IoBuf};
 use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use compio::runtime;
@@ -122,7 +123,7 @@ impl TlsServer {
         }
     }
 
-    #[instrument(skip(buf, backend), ret, err)]
+    #[instrument(skip(buf, backend), err)]
     async fn handle_tls_stream_once(
         tls_stream: &mut TlsStream<TcpStream>,
         len: usize,
@@ -131,7 +132,7 @@ impl TlsServer {
         backend: &dyn DynBackend,
     ) -> anyhow::Result<BytesMut> {
         buf.reserve(len);
-        let (res, buf) = tls_stream.read_exact(buf).await.to_parts();
+        let (res, buf) = tls_stream.read_exact(buf.slice(..len)).await.to_parts();
         res.with_context(|| format!("read dns request with length {len} failed"))?;
 
         let message = Message::from_vec(&buf).with_context(|| "parse dns message failed")?;
@@ -152,6 +153,6 @@ impl TlsServer {
             .await
             .with_context(|| "flush dns stream failed")?;
 
-        Ok(buf)
+        Ok(buf.into_inner())
     }
 }

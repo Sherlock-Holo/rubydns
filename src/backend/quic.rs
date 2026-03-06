@@ -117,7 +117,7 @@ impl QuicBackend {
 }
 
 impl Backend for QuicBackend {
-    #[instrument(skip(self), ret(Display), err)]
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     async fn send_request(
         &self,
         mut message: Message,

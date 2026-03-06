@@ -22,7 +22,7 @@ impl UdpBackend {
         Self { addrs, timeout }
     }
 
-    #[instrument(skip(self), ret(Display), err)]
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponseWrapper> {
         let addr = self
             .addrs
@@ -60,7 +60,7 @@ impl UdpBackend {
 }
 
 impl Backend for UdpBackend {
-    #[instrument(skip(self), ret, err)]
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     async fn send_request(
         &self,
         message: Message,

@@ -1178,7 +1178,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 [[package]]
 name = "hickory-proto"
 version = "0.26.0-alpha.1"
-source = "git+https://github.com/hickory-dns/hickory-dns/#6aaeb47366bbb4181ce3b2cd7aae39bfcc1c9ca3"
+source = "git+https://github.com/hickory-dns/hickory-dns/#7325541085fb1485555ca94bf8968beee900a14b"
 dependencies = [
  "data-encoding",
  "idna",
@@ -2366,9 +2366,9 @@ checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
 name = "synchrony"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86246561e65786098f4dbe4d95bd7550ec541ff83921ab878e3b51c615735673"
+checksum = "833f3fa2585e125e37cc9f07a0a80c101e243436adf382cdf2b3db8d02fc44e5"
 dependencies = [
  "futures-util",
 ]
@@ -3262,9 +3262,9 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
-version = "0.7.14"
+version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]

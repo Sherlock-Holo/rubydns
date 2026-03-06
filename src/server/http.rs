@@ -139,7 +139,7 @@ impl HttpsServer {
         path: String,
         backend: Rc<dyn DynBackend>,
     ) -> anyhow::Result<HttpsServer> {
-        let server_config = rustls::ServerConfig::builder()
+        let server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certificate, private_key)?;
         let quic_server_config = QuicServerConfig::try_from(server_config)?;

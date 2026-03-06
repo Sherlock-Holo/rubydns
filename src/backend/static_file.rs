@@ -78,7 +78,7 @@ impl StaticFileBackend {
         })
     }
 
-    #[instrument(skip(self), ret(Display), err)]
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     fn lookup_and_build_response(&self, message: Message) -> anyhow::Result<DnsResponseWrapper> {
         let query = message
             .queries()

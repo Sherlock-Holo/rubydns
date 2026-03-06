@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use bytes::BytesMut;
+use compio::buf::IoBuf;
 use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use compio::net::UdpSocket;
 use compio::quic::crypto::rustls::QuicServerConfig;
@@ -18,11 +18,12 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing::{debug, error, instrument};
 
 use crate::backend::DynBackend;
-use crate::utils::PartsExt;
+use crate::utils::{BytesMutObject, BytesMutPool, PartsExt};
 
 pub struct QuicServer {
     endpoint: Endpoint,
     backend: Rc<dyn DynBackend>,
+    bytes_mut_pool: BytesMutPool,
 }
 
 impl Debug for QuicServer {
@@ -41,9 +42,11 @@ impl QuicServer {
         backend: Rc<dyn DynBackend>,
         idle: Duration,
     ) -> anyhow::Result<Self> {
-        let server_config = rustls::ServerConfig::builder()
+        let mut server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certificate, private_key)?;
+
+        server_config.alpn_protocols = vec![b"doq".to_vec()];
 
         let quic_server_config = QuicServerConfig::try_from(server_config)?;
         let mut server_config = ServerConfig::with_crypto(Arc::new(quic_server_config));
@@ -60,7 +63,11 @@ impl QuicServer {
             None,
         )?;
 
-        Ok(Self { endpoint, backend })
+        Ok(Self {
+            endpoint,
+            backend,
+            bytes_mut_pool: BytesMutPool::new(4096),
+        })
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
@@ -74,6 +81,7 @@ impl QuicServer {
             debug!(?incoming, "accepted new incoming connection");
 
             let backend = self.backend.clone();
+            let bytes_mut_pool = self.bytes_mut_pool.clone();
             runtime::spawn(async move {
                 let connection = match incoming.await {
                     Ok(conn) => conn,
@@ -85,7 +93,7 @@ impl QuicServer {
 
                 debug!(?connection, "accepted new QUIC connection");
 
-                Self::handle_connection(connection, backend).await
+                Self::handle_connection(connection, backend, bytes_mut_pool).await
             })
             .detach();
         }
@@ -94,6 +102,7 @@ impl QuicServer {
     async fn handle_connection(
         connection: Connection,
         backend: Rc<dyn DynBackend>,
+        bytes_mut_pool: BytesMutPool,
     ) -> anyhow::Result<()> {
         let peer_addr = connection.remote_address();
 
@@ -106,8 +115,8 @@ impl QuicServer {
             debug!(?connection, %peer_addr, "accepted new QUIC bi stream");
 
             let backend = backend.clone();
-            runtime::spawn(async move { Self::handle_stream(tx, rx, backend, peer_addr).await })
-                .detach();
+            let buf = bytes_mut_pool.get_bytes_mut().await;
+            runtime::spawn(Self::handle_stream(tx, rx, backend, buf, peer_addr)).detach();
         }
     }
 
@@ -116,10 +125,9 @@ impl QuicServer {
         mut tx: SendStream,
         mut rx: RecvStream,
         backend: Rc<dyn DynBackend>,
+        buf: BytesMutObject,
         peer_addr: SocketAddr,
     ) -> anyhow::Result<()> {
-        let mut buf = BytesMut::with_capacity(4096);
-
         // Read request length
         let len = rx
             .read_u16()
@@ -131,9 +139,7 @@ impl QuicServer {
             return Err(anyhow::anyhow!("dns request length is 0"));
         }
 
-        // Read request data
-        buf.reserve(len);
-        let (res, buf) = rx.read_exact(buf).await.to_parts();
+        let (res, buf) = rx.read_exact(buf.slice(..len)).await.to_parts();
         res.with_context(|| format!("read dns request with length {len} failed"))?;
 
         // Parse DNS message
