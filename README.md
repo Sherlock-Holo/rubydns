@@ -1,13 +1,13 @@
-# edns_proxy
+# rubydns
 
-EDNS client subnet DNS proxy server
+A Rust DNS server, support multi backend
 
 ## Features
 
 ### Bind
 
 - [x] bind UDP
-- [X] bind TCP
+- [ ] bind TCP
 - [X] bind DoH
 - [X] bind DoT
 - [X] bind QUIC

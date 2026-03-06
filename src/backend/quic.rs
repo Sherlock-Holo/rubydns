@@ -1,29 +1,32 @@
 use std::collections::HashSet;
-use std::fmt::{Debug, Formatter};
-use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::net::{Ipv6Addr, SocketAddr};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
-use async_trait::async_trait;
-use futures_util::TryStreamExt;
-use hickory_proto::op::Message;
-use hickory_proto::quic::{QuicClientStream, QuicClientStreamBuilder};
-use hickory_proto::xfer::{
-    DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse, FirstAnswer,
-};
-use rand::prelude::*;
+use arc_swap::ArcSwap;
+use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use compio::net::UdpSocket;
+use compio::quic::crypto::rustls::QuicClientConfig;
+use compio::quic::{ClientConfig, Connection, Endpoint};
+use compio::runtime::JoinHandle;
+use compio::{BufResult, runtime, time};
+use hickory_proto26::op::{DnsResponse, Message};
 use rand::rng;
-use rustls::{ClientConfig, RootCertStore};
-use tracing::{Instrument, info_span, instrument};
+use rand::seq::IteratorRandom;
+use rustls::RootCertStore;
+use tracing::{error, info, instrument};
 
-use crate::backend::Backend;
+use super::{Backend, DnsResponseWrapper};
 
 #[derive(Debug)]
 pub struct QuicBackend {
-    inner: Arc<QuicBackendInner>,
+    connection: Rc<ArcSwap<Connection>>,
+    _background_task: JoinHandle<()>,
 }
 
 impl QuicBackend {
-    pub fn new(addrs: HashSet<SocketAddr>, host: String) -> anyhow::Result<Self> {
+    pub async fn new(addrs: HashSet<SocketAddr>, host: String) -> anyhow::Result<Self> {
         let mut root_cert_store = RootCertStore::empty();
         let certs = rustls_native_certs::load_native_certs();
         if !certs.errors.is_empty() {
@@ -36,113 +39,119 @@ impl QuicBackend {
             root_cert_store.add(cert)?;
         }
 
-        let client_config = ClientConfig::builder()
+        let mut client_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"doq".to_vec()];
 
-        let mut builder = QuicClientStreamBuilder::default();
-        builder.crypto_config(client_config);
+        let endpoint = Endpoint::new(
+            UdpSocket::bind(SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0)).await?,
+            Default::default(),
+            None,
+            Some(ClientConfig::new(Arc::new(QuicClientConfig::try_from(
+                client_config,
+            )?))),
+        )?;
+
+        let addr = *addrs.iter().choose(&mut rng()).unwrap();
+        let connection = Self::connect_to(&endpoint, addr, &host).await?;
+        let connection = Rc::new(ArcSwap::from_pointee(connection));
+
+        let background_task = runtime::spawn(Self::check_and_reconnect(
+            endpoint,
+            connection.clone(),
+            addrs,
+            host,
+        ));
 
         Ok(Self {
-            inner: Arc::new(QuicBackendInner {
-                addrs,
-                host,
-                builder,
-                stream_cache: RwLock::new(None),
-            }),
+            connection,
+            _background_task: background_task,
         })
     }
 
-    async fn build_stream(&self) -> anyhow::Result<QuicClientStream> {
-        let addr = self
-            .inner
-            .addrs
-            .iter()
-            .copied()
-            .choose(&mut rng())
-            .expect("addrs must not empty");
+    async fn check_and_reconnect(
+        endpoint: Endpoint,
+        connection: Rc<ArcSwap<Connection>>,
+        addrs: HashSet<SocketAddr>,
+        host: String,
+    ) {
+        loop {
+            let connection_guard = connection.load();
+            connection_guard.closed().await;
 
-        self.inner
-            .builder
-            .clone()
-            .build(addr, self.inner.host.clone())
-            .await
-            .map_err(Into::into)
-    }
+            loop {
+                time::sleep(Duration::from_secs(3)).await;
+                let addr = *addrs.iter().choose(&mut rng()).unwrap();
 
-    #[instrument(skip(stream), ret, err)]
-    async fn do_send_with_stream(
-        stream: &mut QuicClientStream,
-        message: Message,
-    ) -> anyhow::Result<DnsResponse> {
-        stream
-            .try_next()
-            .instrument(info_span!("wait_stream_ready"))
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("quic stream connected but closed immediately"))?;
+                if let Ok(new_connection) = Self::connect_to(&endpoint, addr, &host).await {
+                    info!(%addr, "reconnect to DoQ server done");
 
-        let mut options = DnsRequestOptions::default();
-        options.use_edns = true;
-        let request = DnsRequest::new(message, options);
-        let dns_response = stream
-            .send_message(request)
-            .first_answer()
-            .instrument(info_span!("first_answer"))
-            .await?;
-
-        Ok(dns_response)
-    }
-
-    #[instrument(skip(self), ret, err)]
-    async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponse> {
-        let stream = self.inner.stream_cache.read().unwrap().clone();
-
-        if let Some(mut s) = stream {
-            match Self::do_send_with_stream(&mut s, message.clone()).await {
-                Ok(r) => return Ok(r),
-                Err(_) => {
-                    *self.inner.stream_cache.write().unwrap() = None;
+                    // arc-swap need it
+                    #[allow(clippy::arc_with_non_send_sync)]
+                    connection.store(Arc::new(new_connection));
+                    break;
                 }
             }
         }
+    }
 
-        let mut new_stream = self.build_stream().await?;
-        *self.inner.stream_cache.write().unwrap() = Some(new_stream.clone());
+    #[instrument(skip(endpoint), ret, err)]
+    async fn connect_to(
+        endpoint: &Endpoint,
+        addr: SocketAddr,
+        host: &str,
+    ) -> anyhow::Result<Connection> {
+        let connection = endpoint
+            .connect(addr, host, None)
+            .inspect_err(|err| {
+                error!(%err, "try to connect to DoQ server failed");
+            })?
+            .await
+            .inspect_err(|err| {
+                error!(%err, "connect to DoQ server failed");
+            })?;
 
-        Self::do_send_with_stream(&mut new_stream, message).await
+        Ok(connection)
     }
 }
 
-struct QuicBackendInner {
-    addrs: HashSet<SocketAddr>,
-    host: String,
-    builder: QuicClientStreamBuilder,
-    stream_cache: RwLock<Option<QuicClientStream>>,
-}
-
-impl Debug for QuicBackendInner {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QuicBackendInner")
-            .field("addrs", &self.addrs)
-            .field("host", &self.host)
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
 impl Backend for QuicBackend {
-    #[instrument(skip(self), ret, err)]
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     async fn send_request(
         &self,
-        message: Message,
+        mut message: Message,
         _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse> {
-        let res = self.do_send(message.clone()).await;
-        if res.is_ok() {
-            return res;
+    ) -> anyhow::Result<DnsResponseWrapper> {
+        // RFC: When sending queries over a QUIC connection, the DNS Message ID MUST be set to 0.
+        // The stream mapping for DoQ allows for unambiguous correlation of queries and responses,
+        // so the Message ID field is not required.
+        message.set_id(0);
+
+        let request = message.to_vec()?;
+        let len = request.len();
+        if len > u16::MAX as _ {
+            return Err(anyhow::anyhow!("message length {} too long", request.len()));
         }
 
-        self.do_send(message).await
+        let (mut tx, mut rx) = self.connection.load().open_bi_wait().await?;
+
+        tx.write_all((len as u16).to_be_bytes()).await.0?;
+        tx.write_all(request).await.0?;
+        tx.flush().await?;
+
+        let BufResult(res, len_buf) = rx.read_exact([0; 2]).await;
+        res?;
+        let resp_len = u16::from_be_bytes(len_buf);
+
+        if resp_len == 0 {
+            return Err(anyhow::anyhow!("response length is 0"));
+        }
+
+        let BufResult(res, resp_data) = rx.read_exact(Vec::with_capacity(resp_len as usize)).await;
+        res?;
+
+        Ok(DnsResponse::from_buffer(resp_data)?.into())
     }
 }
 
@@ -150,17 +159,18 @@ impl Backend for QuicBackend {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use super::super::tests::*;
+    use super::super::tests::{check_dns_response, create_query_message, init_tls_provider};
     use super::*;
 
-    #[tokio::test]
+    #[compio::test]
     async fn test() {
         init_tls_provider();
 
         let backend = QuicBackend::new(
-            ["45.90.28.1:853".parse().unwrap()].into(),
-            "dns.nextdns.io".to_string(),
+            ["223.5.5.5:853".parse().unwrap()].into(),
+            "dns.alidns.com".to_string(),
         )
+        .await
         .unwrap();
 
         let dns_response = backend

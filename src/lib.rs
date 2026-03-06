@@ -1,34 +1,39 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
-use std::iter::repeat_n;
 use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use async_notify::Notify;
 use clap::Parser;
 use clap::builder::styling;
-use futures_util::{FutureExt, select};
-use hickory_proto::xfer::Protocol;
-use hickory_resolver::Resolver;
-use hickory_resolver::config::{NameServerConfig, ResolverConfig};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use compio::driver::Proactor;
+use compio::net::{TcpListener, UdpSocket};
+use compio::runtime;
+use compio::runtime::Runtime;
+use flume::Receiver;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt, TryStreamExt, select};
+use hickory_proto26::op::{Message, Query};
+use hickory_proto26::rr::{Name, RData, RecordType};
 use itertools::Itertools;
+use nix::sys::signal;
+use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio::runtime::Builder;
-use tokio::signal::unix;
-use tokio::signal::unix::SignalKind;
 use tower::Layer;
 use tower::layer::layer_fn;
-use tracing::error;
 use tracing::instrument;
+use tracing::{error, info};
 
 use crate::addr::BindAddr;
 use crate::backend::{
-    DynBackend, Group, H3Backend, HttpsBackend, QuicBackend, StaticFileBackend, TlsBackend,
+    Backend, DynBackend, Group, HttpsBackend, QuicBackend, StaticFileBackend, TlsBackend,
     UdpBackend,
 };
 use crate::cache::Cache;
@@ -40,11 +45,13 @@ use crate::filter::ecs::EcsFilterLayer;
 use crate::filter::static_ecs::StaticEcsFilterLayer;
 use crate::layer::LayerBuilder;
 use crate::log::{LogLevel, init_log};
-use crate::proxy::{
-    BindSocket, SocketType, create_tcp_listener_reuse_port, create_udp_socket_reuse_port,
-    socket_type_for_bind, start_proxy_with_socket,
-};
-use crate::route::{Route, dnsmasq::DnsmasqExt};
+use crate::proxy::ProxyBackend;
+use crate::route::Route;
+use crate::route::dnsmasq::DnsmasqExt;
+use crate::server::http::HttpsServer;
+use crate::server::quic::QuicServer;
+use crate::server::tls::TlsServer;
+use crate::server::udp::UdpServer;
 
 mod addr;
 mod backend;
@@ -55,6 +62,7 @@ mod layer;
 mod log;
 mod proxy;
 mod route;
+mod server;
 mod utils;
 mod wrr;
 
@@ -70,6 +78,8 @@ const DEFAULT_RETRY_ATTEMPTS: NonZeroUsize = const {
         Some(v) => v,
     }
 };
+
+const DEFAULT_SERVER_IDLE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
 #[command(styles = STYLES)]
@@ -98,6 +108,9 @@ pub struct Args {
 pub async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    // Must block process signals before any subsystem may spawn background threads.
+    block_signal()?;
+
     let _guard = init_log(
         args.log_level,
         args.otel_endpoint,
@@ -106,34 +119,58 @@ pub async fn run() -> anyhow::Result<()> {
     )?;
     init_tls_provider();
 
-    let config = Config::read(&args.config)?;
-    let backends = collect_backends(config.backend).await?;
-    let (join_handles, shutdown_notify, threads) = spawn_proxy_workers(config.proxy, backends)?;
+    let Config {
+        workers,
+        proxy,
+        backend,
+    } = Config::read(&args.config)?;
 
-    signal_stop().await?;
+    info!(config = %args.config, "edns-proxy config loaded");
 
-    shutdown_notify.notify_n(NonZeroUsize::new(threads).unwrap());
-    for handle in join_handles {
-        if let Ok(Err(err)) = handle.join() {
-            error!(%err, "worker thread failed");
+    let workers = workers.count();
+    let (shutdown_notify, shutdown_waiters, worker_result_rx) =
+        spawn_proxy_workers(proxy, backend, workers)?;
+
+    info!(workers, "proxy workers started");
+
+    let mut worker_results = worker_result_rx.into_stream();
+
+    select! {
+        res = signal_stop().fuse() => {
+            res?;
+
+            info!("shutdown signal received, stopping proxy workers");
+
+            shutdown_notify.notify_n(NonZeroUsize::new(shutdown_waiters).unwrap());
         }
+
+        res = worker_results.next() => {
+            res.unwrap()?;
+        }
+    }
+
+    while let Some(res) = worker_results.next().await {
+        res?;
     }
 
     Ok(())
 }
 
 async fn collect_backends(
-    cfg_backends: Vec<config::Backend>,
-) -> anyhow::Result<HashMap<String, DynBackend>> {
+    cfg_backends: &[config::Backend],
+) -> anyhow::Result<HashMap<String, Rc<dyn DynBackend>>> {
     let mut backend_groups = HashMap::new();
     let mut backends = HashMap::with_capacity(cfg_backends.len());
     for backend in cfg_backends {
-        let name = backend.name;
-        if backends.contains_key(&name) {
-            return Err(anyhow::anyhow!("backend '{}' already exists", name));
+        let name = &backend.name;
+        let backend_type = backend.backend_detail.backend_type();
+        if backends.contains_key(name) {
+            return Err(anyhow::anyhow!(
+                "{backend_type} backend '{name}' already exists"
+            ));
         }
 
-        let backend: DynBackend = match backend.backend_detail {
+        let backend: Rc<dyn DynBackend> = match &backend.backend_detail {
             BackendDetail::Tls(config::TlsBackend {
                 tls_name,
                 port,
@@ -141,33 +178,21 @@ async fn collect_backends(
             }) => {
                 let addrs = match bootstrap_or_addrs {
                     BootstrapOrAddrs::Bootstrap(bootstrap) => {
-                        bootstrap_domain(&bootstrap, &tls_name, port).await?
+                        bootstrap_domain(bootstrap, tls_name, *port).await?
                     }
-                    BootstrapOrAddrs::Addr(addrs) => addrs,
+                    BootstrapOrAddrs::Addr(addrs) => addrs.clone(),
                 };
 
-                Arc::new(TlsBackend::new(addrs, tls_name)?)
+                Rc::new(TlsBackend::new(addrs, tls_name.clone())?)
             }
 
-            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Arc::new(UdpBackend::new(
-                addr.into_iter().collect(),
+            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Rc::new(UdpBackend::new(
+                addr.iter().copied().collect(),
                 timeout.map(|timeout| timeout.into_inner()),
             )),
 
-            BackendDetail::Https(config::HttpsBasedBackend {
-                host,
-                path,
-                port,
-                bootstrap_or_addrs,
-            }) => {
-                let addrs = match bootstrap_or_addrs {
-                    BootstrapOrAddrs::Bootstrap(bootstrap) => {
-                        bootstrap_domain(&bootstrap, &host, port).await?
-                    }
-                    BootstrapOrAddrs::Addr(addrs) => addrs,
-                };
-
-                Arc::new(HttpsBackend::new(addrs, host, path)?)
+            BackendDetail::Https(config::HttpsBackend { url, ips }) => {
+                Rc::new(HttpsBackend::new(url.clone(), ips.iter().copied(), false))
             }
 
             BackendDetail::Quic(config::TlsBackend {
@@ -177,31 +202,21 @@ async fn collect_backends(
             }) => {
                 let addrs = match bootstrap_or_addrs {
                     BootstrapOrAddrs::Bootstrap(bootstrap) => {
-                        bootstrap_domain(&bootstrap, &tls_name, port).await?
+                        bootstrap_domain(bootstrap, tls_name, *port).await?
                     }
-                    BootstrapOrAddrs::Addr(addrs) => addrs,
+                    BootstrapOrAddrs::Addr(addrs) => addrs.clone(),
                 };
-                Arc::new(QuicBackend::new(addrs, tls_name)?)
+
+                Rc::new(QuicBackend::new(addrs, tls_name.to_string()).await?)
             }
 
-            BackendDetail::H3(config::HttpsBasedBackend {
-                host,
-                path,
-                port,
-                bootstrap_or_addrs,
-            }) => {
-                let addrs = match bootstrap_or_addrs {
-                    BootstrapOrAddrs::Bootstrap(bootstrap) => {
-                        bootstrap_domain(&bootstrap, &host, port).await?
-                    }
-                    BootstrapOrAddrs::Addr(addrs) => addrs,
-                };
-                Arc::new(H3Backend::new(addrs, host, path)?)
+            BackendDetail::H3(config::HttpsBackend { url, ips }) => {
+                Rc::new(HttpsBackend::new(url.clone(), ips.iter().copied(), true))
             }
 
             BackendDetail::StaticFile(static_config) => {
                 let static_file_backend_config = static_config.load()?;
-                Arc::new(StaticFileBackend::new(static_file_backend_config)?)
+                Rc::new(StaticFileBackend::new(static_file_backend_config)?)
             }
 
             BackendDetail::Group(backend_info_list) => {
@@ -211,13 +226,15 @@ async fn collect_backends(
             }
         };
 
-        backends.insert(name, backend);
+        info!("create {backend_type} backend '{name}' done");
+
+        backends.insert(name.to_string(), backend);
     }
 
     for (name, group_backend) in backend_groups {
-        let grouped_backends = group_backend
+        let grouped_backends: Vec<(usize, Rc<dyn DynBackend>)> = group_backend
             .backends
-            .into_iter()
+            .iter()
             .map(|info| {
                 backends
                     .get(&info.name)
@@ -225,115 +242,275 @@ async fn collect_backends(
                     .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", info.name))
                     .map(|backend| (info.weight, backend))
             })
-            .try_collect::<_, Vec<_>, _>()?;
+            .try_collect()?;
 
         let group = Group::new(grouped_backends);
 
-        backends.insert(name, Arc::new(group));
+        info!("create group backend '{name}' done");
+
+        backends.insert(name.to_string(), Rc::new(group));
     }
 
     Ok(backends)
 }
 
-type SpawnResult = (
-    Vec<thread::JoinHandle<anyhow::Result<()>>>,
-    Arc<Notify>,
-    usize,
-);
+async fn run_server_until_shutdown(
+    bind_addr: BindAddr,
+    backend: Rc<dyn DynBackend>,
+    shutdown: Arc<Notify>,
+) -> anyhow::Result<()> {
+    match bind_addr {
+        BindAddr::Udp(addr) => {
+            info!(%addr, "starting UDP DNS server");
 
-fn spawn_proxy_workers(
-    proxy_configs: Vec<Proxy>,
-    backends: HashMap<String, DynBackend>,
-) -> anyhow::Result<SpawnResult> {
-    let mut join_handles = Vec::new();
-    let shutdown_notify = Arc::new(Notify::new());
+            let udp_socket = create_udp_socket_reuse_port(addr)?;
+            let server = UdpServer::new(udp_socket, backend)?;
 
-    let mut threads = 0;
-    for proxy in proxy_configs {
-        let default_backend = backends
-            .get(&proxy.backend)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
-        let default_backend = filter_backend(proxy.filter, default_backend);
-        let bind_addr = create_bind_addr(proxy.bind)?;
-
-        let mut route = Route::default();
-        for route_config in proxy.route {
-            let backend = backends
-                .get(&route_config.backend)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
-            let backend = filter_backend(route_config.filter, backend);
-
-            match route_config.route_type {
-                RouteType::Normal { path } => {
-                    let file = File::open(path)
-                        .inspect_err(|err| error!(%err, "open normal file failed"))?;
-                    route.import(file, backend)?;
-                }
-
-                RouteType::Dnsmasq { path } => {
-                    let file = File::open(path)
-                        .inspect_err(|err| error!(%err, "open dnsmasq file failed"))?;
-                    route.import_from_dnsmasq(file, backend)?;
-                }
+            select! {
+                _ = shutdown.notified().fuse() => Ok(()),
+                _ = server.run().fuse() => Ok(()),
             }
         }
 
-        let n = proxy.workers.count();
-        threads += n;
+        BindAddr::Tcp { .. } => {
+            todo!("tcp server not implemented yet");
+        }
 
-        let route = Arc::new(route);
-        let bind_addr = Arc::new(bind_addr);
-        let cache_config = proxy
-            .cache
-            .map(|c| (c.capacity, c.ipv4_fuzz_prefix, c.ipv6_fuzz_prefix));
+        BindAddr::Tls {
+            addr,
+            certificate,
+            private_key,
+            timeout,
+        } => {
+            info!(%addr, idle = ?timeout.unwrap_or(DEFAULT_SERVER_IDLE), "starting TLS DNS server");
 
-        for backend in repeat_n(default_backend, n) {
-            let shutdown = shutdown_notify.clone();
-            let route = route.clone();
-            let bind_addr = bind_addr.clone();
+            let tcp_listener = create_tcp_listener_reuse_port(addr)?;
+            let server = TlsServer::new(
+                tcp_listener,
+                certificate,
+                private_key,
+                backend,
+                timeout.unwrap_or(DEFAULT_SERVER_IDLE),
+            )?;
 
-            let handle = thread::spawn(move || {
-                let rt = Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap_or_else(|err| panic!("build runtime failed: {err}"));
+            select! {
+                _ = shutdown.notified().fuse() => Ok(()),
+                res = server.run().fuse() => res,
+            }
+        }
 
-                rt.block_on(async move {
-                    let socket = match socket_type_for_bind(&bind_addr) {
-                        SocketType::Udp => {
-                            BindSocket::Udp(create_udp_socket_reuse_port(bind_addr.addr())?)
-                        }
-                        SocketType::Tcp => {
-                            BindSocket::Tcp(create_tcp_listener_reuse_port(bind_addr.addr())?)
-                        }
-                    };
+        BindAddr::Quic {
+            addr,
+            certificate,
+            private_key,
+            timeout,
+        } => {
+            info!(%addr, idle = ?timeout.unwrap_or(DEFAULT_SERVER_IDLE), "starting QUIC DNS server");
 
-                    let cache = cache_config.map(|(cap, v4, v6)| Cache::new(cap, v4, v6));
+            let udp_socket = create_udp_socket_reuse_port(addr)?;
+            let server = QuicServer::new(
+                udp_socket,
+                certificate,
+                private_key,
+                backend,
+                timeout.unwrap_or(DEFAULT_SERVER_IDLE),
+            )?;
 
-                    let task = start_proxy_with_socket(
-                        bind_addr,
-                        socket,
-                        route,
-                        backend,
-                        cache,
-                        proxy.retry_attempts.unwrap_or(DEFAULT_RETRY_ATTEMPTS),
-                    )
-                    .await?;
+            select! {
+                _ = shutdown.notified().fuse() => Ok(()),
+                res = server.run().fuse() => res,
+            }
+        }
 
-                    task.run_until_shutdown(shutdown).await
-                })
-            });
+        BindAddr::Https {
+            addr,
+            certificate,
+            private_key,
+            path,
+            ..
+        } => {
+            info!(%addr, path = %path, "starting HTTPS DNS server");
 
-            join_handles.push(handle);
+            let tcp_listener = create_tcp_listener_reuse_port(addr)?;
+            let server =
+                HttpsServer::new_h2(tcp_listener, certificate, private_key, path, backend)?;
+
+            select! {
+                _ = shutdown.notified().fuse() => Ok(()),
+                res = server.run().fuse() => res,
+            }
+        }
+
+        BindAddr::H3 {
+            addr,
+            certificate,
+            private_key,
+            ..
+        } => {
+            info!(%addr, path = "/dns-query", "starting HTTP/3 DNS server");
+
+            let udp_socket = create_udp_socket_reuse_port(addr)?;
+            let server = HttpsServer::new_h3(
+                udp_socket,
+                certificate,
+                private_key,
+                "/dns-query".to_string(),
+                backend,
+            )?;
+
+            select! {
+                _ = shutdown.notified().fuse() => Ok(()),
+                res = server.run().fuse() => res,
+            }
         }
     }
-
-    Ok((join_handles, shutdown_notify, threads))
 }
 
-fn filter_backend(filter: Vec<Filter>, backend: DynBackend) -> DynBackend {
+fn create_udp_socket_reuse_port(addr: SocketAddr) -> anyhow::Result<UdpSocket> {
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, None)?;
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&socket2::SockAddr::from(addr))?;
+    let std_socket = std::net::UdpSocket::from(socket);
+    UdpSocket::from_std(std_socket).map_err(Into::into)
+}
+
+fn create_tcp_listener_reuse_port(addr: SocketAddr) -> anyhow::Result<TcpListener> {
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, None)?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&socket2::SockAddr::from(addr))?;
+    socket.listen(1024)?;
+    let std_listener = std::net::TcpListener::from(socket);
+    TcpListener::from_std(std_listener).map_err(Into::into)
+}
+
+type SpawnResult = (Arc<Notify>, usize, Receiver<anyhow::Result<()>>);
+
+fn spawn_proxy_workers(
+    proxy_configs: Vec<Proxy>,
+    backend_configs: Vec<config::Backend>,
+    threads: usize,
+) -> anyhow::Result<SpawnResult> {
+    let shutdown_notify = Arc::new(Notify::new());
+    let (worker_result_tx, worker_result_rx) = flume::unbounded();
+    let proxy_configs = Arc::<[Proxy]>::from(proxy_configs);
+    let backend_configs = Arc::<[config::Backend]>::from(backend_configs);
+    let shutdown_waiters = threads * proxy_configs.len();
+
+    for _ in 0..threads {
+        let shutdown = shutdown_notify.clone();
+        let backend_configs = backend_configs.clone();
+        let proxy_configs = proxy_configs.clone();
+        let worker_result_tx = worker_result_tx.clone();
+
+        thread::spawn(move || {
+            let mut builder = Runtime::builder();
+            let mut proactor_builder = Proactor::builder();
+            proactor_builder
+                .capacity(128)
+                .coop_taskrun(true)
+                .taskrun_flag(true);
+
+            let runtime = builder.with_proactor(proactor_builder).build().unwrap();
+
+            let run_result = runtime.block_on(async move {
+                let backends = select! {
+                    _ = shutdown.notified().fuse() => {
+                        return Ok(());
+                    }
+                    res = collect_backends(&backend_configs).fuse() => res?,
+                };
+                let mut servers = FuturesUnordered::new();
+
+                for proxy in proxy_configs.iter().cloned() {
+                    let bind_addr = create_bind_addr(proxy.bind)?;
+                    let default_backend = backends
+                        .get(&proxy.backend)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
+                    let default_backend = filter_backend(proxy.filter, default_backend);
+
+                    let mut route = Route::default();
+                    for route_config in proxy.route {
+                        let backend =
+                            backends
+                                .get(&route_config.backend)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("backend '{}' not found", route_config.backend)
+                                })?;
+                        let backend = filter_backend(route_config.filter, backend);
+
+                        match route_config.route_type {
+                            RouteType::Normal { path } => {
+                                let file = File::open(path)
+                                    .inspect_err(|err| error!(%err, "open normal file failed"))?;
+                                route.import(file, backend)?;
+                            }
+
+                            RouteType::Dnsmasq { path } => {
+                                let file = File::open(path)
+                                    .inspect_err(|err| error!(%err, "open dnsmasq file failed"))?;
+                                route.import_from_dnsmasq(file, backend)?;
+                            }
+                        }
+                    }
+
+                    let retry_attempts = proxy.retry_attempts.unwrap_or(DEFAULT_RETRY_ATTEMPTS);
+                    let proxy_backend = ProxyBackend::new(
+                        proxy.cache.map(|c| {
+                            Cache::new(c.capacity, c.ipv4_fuzz_prefix, c.ipv6_fuzz_prefix)
+                        }),
+                        default_backend,
+                        route,
+                        retry_attempts,
+                    );
+
+                    info!(
+                        ?bind_addr,
+                        backend = %proxy.backend,
+                        retry_attempts = retry_attempts.get(),
+                        "proxy worker initialized"
+                    );
+
+                    servers.push(runtime::spawn(run_server_until_shutdown(
+                        bind_addr,
+                        Rc::new(proxy_backend),
+                        shutdown.clone(),
+                    )));
+                }
+
+                while let Some(res) = servers
+                    .try_next()
+                    .await
+                    .map_err(|err| anyhow::anyhow!("proxy panic: {err:?}"))?
+                {
+                    res?;
+                }
+
+                Ok(())
+            });
+
+            let _ = worker_result_tx.send(run_result);
+        });
+    }
+
+    Ok((shutdown_notify, shutdown_waiters, worker_result_rx))
+}
+
+fn filter_backend(filter: Vec<Filter>, backend: Rc<dyn DynBackend>) -> Rc<dyn DynBackend> {
     let mut layer_builder = LayerBuilder::new();
     for filter in filter {
         match filter {
@@ -344,7 +521,7 @@ fn filter_backend(filter: Vec<Filter>, backend: DynBackend) -> DynBackend {
                 let layer = EcsFilterLayer::new(ipv4_prefix, ipv6_prefix);
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Arc::new(layer.layer(backend)) as DynBackend
+                    Rc::new(layer.layer(backend)) as Rc<dyn DynBackend>
                 }));
             }
 
@@ -355,7 +532,7 @@ fn filter_backend(filter: Vec<Filter>, backend: DynBackend) -> DynBackend {
                 );
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Arc::new(layer.layer(backend)) as DynBackend
+                    Rc::new(layer.layer(backend)) as Rc<dyn DynBackend>
                 }));
             }
         }
@@ -370,38 +547,44 @@ async fn bootstrap_domain(
     domain: &str,
     port: u16,
 ) -> anyhow::Result<HashSet<SocketAddr>> {
-    let mut resolver_config = ResolverConfig::new();
-    for addr in bootstrap_addr {
-        resolver_config.add_name_server(NameServerConfig::new(*addr, Protocol::Udp));
+    let backend = UdpBackend::new(bootstrap_addr.clone(), Some(Duration::from_secs(5)));
+    let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+    let name = Name::from_utf8(domain)?;
+    let mut addrs = HashSet::new();
+
+    let mut query_a = Message::query();
+    query_a.add_query(Query::query(name.clone(), RecordType::A));
+    if let Ok(resp) = backend.send_request(query_a, src).await {
+        addrs.extend(
+            resp.answers()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::A(ip) => Some(SocketAddr::new(ip.0.into(), port)),
+                    _ => None,
+                }),
+        );
     }
 
-    let async_resolver =
-        Resolver::builder_with_config(resolver_config, TokioConnectionProvider::default()).build();
-
-    let mut addrs = match async_resolver.ipv4_lookup(domain).await {
-        Err(err) if err.is_no_records_found() => HashSet::new(),
-        Err(err) => return Err(err.into()),
-
-        Ok(ipv4_lookup) => ipv4_lookup
-            .into_iter()
-            .map(|ip| SocketAddr::new(ip.0.into(), port))
-            .collect(),
-    };
-
-    match async_resolver.ipv6_lookup(domain).await {
-        Err(err) if err.is_no_records_found() => Ok(addrs),
-        Err(err) => Err(err.into()),
-
-        Ok(ipv6_lookup) => {
-            addrs.extend(
-                ipv6_lookup
-                    .into_iter()
-                    .map(|ip| SocketAddr::new(ip.0.into(), port)),
-            );
-
-            Ok(addrs)
-        }
+    let mut query_aaaa = Message::query();
+    query_aaaa.add_query(Query::query(name, RecordType::AAAA));
+    if let Ok(resp) = backend.send_request(query_aaaa, src).await {
+        addrs.extend(
+            resp.answers()
+                .iter()
+                .filter_map(|record| match record.data() {
+                    RData::AAAA(ip) => Some(SocketAddr::new(ip.0.into(), port)),
+                    _ => None,
+                }),
+        );
     }
+
+    if addrs.is_empty() {
+        return Err(anyhow::anyhow!(
+            "bootstrap domain '{}' resolved to empty set",
+            domain
+        ));
+    }
+    Ok(addrs)
 }
 
 fn create_bind_addr(bind: Bind) -> anyhow::Result<BindAddr> {
@@ -490,12 +673,10 @@ fn create_bind_addr(bind: Bind) -> anyhow::Result<BindAddr> {
 }
 
 async fn signal_stop() -> anyhow::Result<()> {
-    let mut term = unix::signal(SignalKind::terminate())?;
-    let mut interrupt = unix::signal(SignalKind::interrupt())?;
-
+    const SIGTERM: i32 = 15;
     select! {
-        _ = term.recv().fuse() => {}
-        _ = interrupt.recv().fuse() => {}
+        res = compio::signal::ctrl_c().fuse() => { res?; }
+        res = compio::signal::unix::signal(SIGTERM).fuse() => { res?; }
     }
 
     Ok(())
@@ -520,4 +701,14 @@ fn load_certificates_from_pem(path: &str) -> anyhow::Result<Vec<CertificateDer<'
 
 fn load_private_key_from_file(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
     Ok(PrivateKeyDer::from_pem_file(path)?)
+}
+
+fn block_signal() -> anyhow::Result<()> {
+    let mut sig_set = SigSet::empty();
+    sig_set.add(Signal::SIGINT);
+    sig_set.add(Signal::SIGTERM);
+
+    signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&sig_set), None)?;
+
+    Ok(())
 }

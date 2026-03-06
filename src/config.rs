@@ -1,14 +1,17 @@
 use std::collections::HashSet;
 use std::fs::File;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::thread;
 use std::time::Duration;
 
 use humantime_serde::Serde;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default, deserialize_with = "deserialize_workers_config")]
+    pub workers: WorkersConfig,
     pub proxy: Vec<Proxy>,
     pub backend: Vec<Backend>,
 }
@@ -21,7 +24,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Proxy {
     #[serde(flatten)]
     pub bind: Bind,
@@ -31,23 +34,35 @@ pub struct Proxy {
     pub cache: Option<Cache>,
     #[serde(default)]
     pub route: Vec<Route>,
-    #[serde(default)]
-    pub workers: WorkersConfig,
     pub retry_attempts: Option<NonZeroUsize>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(untagged, rename_all = "snake_case")]
+#[derive(Debug, Default, Clone)]
 pub enum WorkersConfig {
     #[default]
     Auto,
     Count(usize),
 }
 
+fn deserialize_workers_config<'de, D>(deserializer: D) -> Result<WorkersConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = <String>::deserialize(deserializer)?;
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(WorkersConfig::Auto);
+    }
+
+    value
+        .parse::<usize>()
+        .map_err(de::Error::custom)
+        .map(WorkersConfig::Count)
+}
+
 impl WorkersConfig {
     pub fn count(&self) -> usize {
         match self {
-            WorkersConfig::Auto => std::thread::available_parallelism()
+            WorkersConfig::Auto => thread::available_parallelism()
                 .map(|p| p.get())
                 .unwrap_or(4),
             WorkersConfig::Count(n) => (*n).max(1),
@@ -55,7 +70,7 @@ impl WorkersConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Bind {
     Udp(UdpBind),
@@ -66,18 +81,18 @@ pub enum Bind {
     H3(HttpsBasedBind),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct UdpBind {
     pub bind_addr: SocketAddr,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TcpBind {
     pub bind_addr: SocketAddr,
     pub timeout: Option<Serde<Duration>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct HttpsBasedBind {
     pub bind_addr: SocketAddr,
     pub bind_domain: Option<String>,
@@ -94,7 +109,7 @@ impl HttpsBasedBind {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TlsBasedBind {
     pub bind_addr: SocketAddr,
     pub bind_tls_name: Option<String>,
@@ -103,34 +118,48 @@ pub struct TlsBasedBind {
     pub certificate: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Backend {
     pub name: String,
     #[serde(flatten)]
     pub backend_detail: BackendDetail,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendDetail {
     Tls(TlsBackend),
     Udp(UdpBackend),
-    Https(HttpsBasedBackend),
-    H3(HttpsBasedBackend),
+    Https(HttpsBackend),
+    H3(HttpsBackend),
     Quic(TlsBackend),
     StaticFile(StaticFileBackend),
 
     Group(GroupBackend),
 }
 
+impl BackendDetail {
+    pub fn backend_type(&self) -> &'static str {
+        match self {
+            BackendDetail::Tls(_) => "tls",
+            BackendDetail::Udp(_) => "udp",
+            BackendDetail::Https(_) => "https",
+            BackendDetail::H3(_) => "h3",
+            BackendDetail::Quic(_) => "quic",
+            BackendDetail::StaticFile(_) => "static_file",
+            BackendDetail::Group(_) => "group",
+        }
+    }
+}
+
 /// Configuration for static file backend (used for deserialization)
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct StaticFileBackend {
     pub file: String,
 }
 
 impl StaticFileBackend {
-    pub fn load(self) -> anyhow::Result<StaticFileBackendConfig> {
+    pub fn load(&self) -> anyhow::Result<StaticFileBackendConfig> {
         let file = File::open(&self.file)?;
         let records = serde_yaml::from_reader(file)?;
 
@@ -150,7 +179,7 @@ pub struct StaticRecord {
     pub ips: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TlsBackend {
     pub tls_name: String,
     #[serde(default = "TlsBackend::default_port")]
@@ -165,28 +194,13 @@ impl TlsBackend {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct HttpsBasedBackend {
-    pub host: String,
-    #[serde(default = "HttpsBasedBackend::default_path")]
-    pub path: String,
-    #[serde(default = "HttpsBasedBackend::default_port")]
-    pub port: u16,
-    #[serde(flatten)]
-    pub bootstrap_or_addrs: BootstrapOrAddrs,
+#[derive(Debug, Deserialize, Clone)]
+pub struct HttpsBackend {
+    pub url: String,
+    pub ips: HashSet<IpAddr>,
 }
 
-impl HttpsBasedBackend {
-    const fn default_port() -> u16 {
-        443
-    }
-
-    fn default_path() -> String {
-        "/dns-query".to_string()
-    }
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum BootstrapOrAddrs {
     Bootstrap(HashSet<SocketAddr>),
@@ -210,7 +224,7 @@ pub struct GroupBackendInfo {
     pub weight: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Route {
     #[serde(flatten)]
     pub route_type: RouteType,
@@ -219,14 +233,14 @@ pub struct Route {
     pub filter: Vec<Filter>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RouteType {
     Normal { path: String },
     Dnsmasq { path: String },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Cache {
     #[serde(default = "Cache::default_capacity")]
     pub capacity: NonZeroUsize,
@@ -250,7 +264,7 @@ impl Cache {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Filter {
     EdnsClientSubnet {
@@ -264,13 +278,13 @@ pub enum Filter {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct StaticEdnsClientSubnetIpv4 {
     pub ip: Ipv4Addr,
     pub prefix: u8,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct StaticEdnsClientSubnetIpv6 {
     pub ip: Ipv6Addr,
     pub prefix: u8,

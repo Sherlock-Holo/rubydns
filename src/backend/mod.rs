@@ -1,39 +1,99 @@
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use hickory_proto::op::Message;
-use hickory_proto::xfer::DnsResponse;
-
 mod group;
-mod h3;
 mod https;
 mod quic;
 mod static_file;
 mod tls;
 mod udp;
-// mod tracing_dns_exchange;
 
-pub use group::Group;
-pub use h3::H3Backend;
-pub use https::HttpsBackend;
-pub use quic::QuicBackend;
-pub use static_file::StaticFileBackend;
-pub use tls::TlsBackend;
-pub use udp::UdpBackend;
+use std::fmt::{Debug, Display, Formatter};
+use std::net::SocketAddr;
+use std::ops::{Deref, DerefMut};
 
-pub type DynBackend = Arc<dyn Backend + Send + Sync>;
+use futures_util::FutureExt;
+use futures_util::future::LocalBoxFuture;
+use hickory_proto26::op::{DnsResponse, Message};
 
-#[async_trait]
-pub trait Backend: Debug {
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse>;
+pub use self::group::Group;
+pub use self::https::HttpsBackend;
+pub use self::quic::QuicBackend;
+pub use self::static_file::StaticFileBackend;
+pub use self::tls::TlsBackend;
+pub use self::udp::UdpBackend;
+
+pub trait Backend {
+    async fn send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> anyhow::Result<DnsResponseWrapper>;
 }
 
-#[async_trait]
-impl Backend for DynBackend {
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
-        (**self).send_request(message, src).await
+#[derive(Clone)]
+pub struct DnsResponseWrapper(pub DnsResponse);
+
+impl DnsResponseWrapper {
+    pub fn into_inner(self) -> DnsResponse {
+        self.0
+    }
+
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.0.into_buffer()
+    }
+}
+
+impl From<DnsResponse> for DnsResponseWrapper {
+    fn from(value: DnsResponse) -> Self {
+        DnsResponseWrapper(value)
+    }
+}
+
+impl From<DnsResponseWrapper> for DnsResponse {
+    fn from(value: DnsResponseWrapper) -> Self {
+        value.0
+    }
+}
+
+impl Deref for DnsResponseWrapper {
+    type Target = DnsResponse;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DnsResponseWrapper {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Debug for DnsResponseWrapper {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        <Message as Debug>::fmt(&self.0, f)
+    }
+}
+
+impl Display for DnsResponseWrapper {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        <Message as Display>::fmt(&self.0, f)
+    }
+}
+
+pub trait DynBackend {
+    fn dyn_send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponseWrapper>>;
+}
+
+impl<T: Backend> DynBackend for T {
+    fn dyn_send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponseWrapper>> {
+        self.send_request(message, src).boxed_local()
     }
 }
 
@@ -42,12 +102,11 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Once;
 
-    use hickory_proto::op::{Message, Query};
-    use hickory_proto::rr::{Name, RData, RecordType};
-    use hickory_proto::xfer::DnsResponse;
+    use hickory_proto26::op::{DnsResponse, Message, Query};
+    use hickory_proto26::rr::{Name, RData, RecordType};
 
     pub fn create_query_message() -> Message {
-        let mut message = Message::new();
+        let mut message = Message::query();
         message.add_query(Query::query(
             Name::from_utf8("www.example.com").unwrap(),
             RecordType::A,

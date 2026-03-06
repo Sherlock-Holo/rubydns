@@ -3,7 +3,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[tokio::main(flavor = "current_thread")]
+#[compio::main]
 async fn main() -> anyhow::Result<()> {
-    edns_proxy::run().await
+    rubydns::run().await
 }

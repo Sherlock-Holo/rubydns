@@ -1,17 +1,17 @@
+use std::cell::RefCell;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 
-use async_trait::async_trait;
-use hickory_proto::op::Message;
-use hickory_proto::xfer::DnsResponse;
+use hickory_proto26::op::Message;
+use tracing::instrument;
 
-use crate::backend::{Backend, DynBackend};
+use super::{Backend, DnsResponseWrapper, DynBackend};
 use crate::wrr::SmoothWeight;
 
 #[derive(Clone)]
 pub struct Group {
-    backends: Arc<Mutex<SmoothWeight<DynBackend>>>,
+    backends: Rc<RefCell<SmoothWeight<Rc<dyn DynBackend>>>>,
 }
 
 impl Debug for Group {
@@ -21,32 +21,34 @@ impl Debug for Group {
 }
 
 impl Group {
-    pub fn new(backends: Vec<(usize, DynBackend)>) -> Self {
+    pub fn new(backends: Vec<(usize, Rc<dyn DynBackend>)>) -> Self {
         let backends =
             backends
                 .into_iter()
                 .fold(SmoothWeight::new(), |mut backends, (weight, backend)| {
                     backends.add(backend, weight as _);
-
                     backends
                 });
 
         Self {
-            backends: Arc::new(Mutex::new(backends)),
+            backends: Rc::new(RefCell::new(backends)),
         }
     }
 }
 
-#[async_trait]
 impl Backend for Group {
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
+    async fn send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let backend = self
             .backends
-            .lock()
-            .unwrap()
+            .borrow_mut()
             .next()
             .expect("backends must not empty");
 
-        backend.send_request(message, src).await
+        backend.dyn_send_request(message, src).await
     }
 }

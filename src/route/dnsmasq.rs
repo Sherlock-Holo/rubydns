@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Read};
-use std::sync::Arc;
+use std::rc::Rc;
 
-use hickory_proto::rr::Name;
+use hickory_proto26::rr::Name;
 use tracing::instrument;
 
 use crate::backend::DynBackend;
@@ -11,16 +11,16 @@ pub trait DnsmasqExt {
     fn import_from_dnsmasq<R: Read>(
         &mut self,
         reader: R,
-        backend: DynBackend,
+        backend: Rc<dyn DynBackend>,
     ) -> anyhow::Result<()>;
 }
 
 impl DnsmasqExt for Route {
-    #[instrument(skip(self, reader), ret, err)]
+    #[instrument(skip(self, reader, backend), ret, err)]
     fn import_from_dnsmasq<R: Read>(
         &mut self,
         reader: R,
-        backend: DynBackend,
+        backend: Rc<dyn DynBackend>,
     ) -> anyhow::Result<()> {
         let lines = BufReader::new(reader).lines();
 
@@ -43,7 +43,7 @@ impl DnsmasqExt for Route {
                 .ok_or_else(|| anyhow::anyhow!("invalid dnsmasq rule: {line}"))?;
             Name::from_utf8(domain)?;
 
-            self.insert(domain.to_string(), Arc::clone(&backend));
+            self.insert(domain.to_string(), backend.clone());
         }
 
         Ok(())
@@ -54,21 +54,21 @@ impl DnsmasqExt for Route {
 mod tests {
     use std::io::Cursor;
     use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use hickory_proto::op::Message;
-    use hickory_proto::xfer::DnsResponse;
+    use hickory_proto26::op::Message;
 
     use super::*;
-    use crate::backend::Backend;
+    use crate::backend::{Backend, DnsResponseWrapper};
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     struct TestBackend;
 
-    #[async_trait]
     impl Backend for TestBackend {
-        async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
+        async fn send_request(
+            &self,
+            _: Message,
+            _: SocketAddr,
+        ) -> anyhow::Result<DnsResponseWrapper> {
             panic!("just for test")
         }
     }
@@ -85,7 +85,7 @@ mod tests {
         let mut route = Route::default();
 
         route
-            .import_from_dnsmasq(reader, Arc::new(TestBackend))
+            .import_from_dnsmasq(reader, Rc::new(TestBackend))
             .unwrap();
 
         assert!(route.get_backend(&"example.com".parse().unwrap()).is_some());

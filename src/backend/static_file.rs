@@ -1,14 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 
-use async_trait::async_trait;
-use hickory_proto::op::{Message, ResponseCode};
-use hickory_proto::rr::{Name, RData, Record, RecordType};
-use hickory_proto::xfer::DnsResponse;
+use hickory_proto26::op::{DnsResponse, Message, ResponseCode};
+use hickory_proto26::rr::{Name, RData, Record, RecordType};
 use tracing::{info, instrument};
 
-use crate::backend::Backend;
+use super::{Backend, DnsResponseWrapper};
 use crate::config::StaticFileBackendConfig;
 
 const DEFAULT_TTL: u32 = 3600; // 1 hour
@@ -32,15 +29,10 @@ impl PartialEq for DomainKey {
 
 impl Eq for DomainKey {}
 
-#[derive(Debug, Default)]
-struct StaticFileInner {
-    exact_matches: BTreeMap<DomainKey, Vec<RData>>,
-    wildcard_matches: HashMap<String, Vec<RData>>,
-}
-
 #[derive(Debug)]
 pub struct StaticFileBackend {
-    inner: Arc<StaticFileInner>,
+    exact_matches: BTreeMap<DomainKey, Vec<RData>>,
+    wildcard_matches: HashMap<String, Vec<RData>>,
 }
 
 impl StaticFileBackend {
@@ -78,20 +70,16 @@ impl StaticFileBackend {
             }
         }
 
-        let inner = StaticFileInner {
-            exact_matches,
-            wildcard_matches,
-        };
-
-        info!(?inner, "created static file backend inner done");
+        info!("created static file backend inner done");
 
         Ok(Self {
-            inner: Arc::new(inner),
+            exact_matches,
+            wildcard_matches,
         })
     }
 
-    #[instrument(skip(self), ret, err)]
-    fn lookup_and_build_response(&self, message: Message) -> anyhow::Result<DnsResponse> {
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
+    fn lookup_and_build_response(&self, message: Message) -> anyhow::Result<DnsResponseWrapper> {
         let query = message
             .queries()
             .first()
@@ -104,7 +92,7 @@ impl StaticFileBackend {
 
         let ips = self.lookup_ips(query_name.clone(), query_type);
 
-        let mut response = Message::new();
+        let mut response = Message::response(message.id(), message.op_code());
         response.set_id(message.id());
         response.set_recursion_desired(message.recursion_desired());
         response.set_recursion_available(true);
@@ -120,13 +108,15 @@ impl StaticFileBackend {
             response.set_response_code(ResponseCode::NXDomain);
         }
 
-        DnsResponse::from_message(response).map_err(Into::into)
+        DnsResponse::from_message(response)
+            .map(Into::into)
+            .map_err(Into::into)
     }
 
     fn lookup_ips(&self, query_name: Name, query_type: RecordType) -> Option<Vec<RData>> {
         let query_key = DomainKey::from_name(query_name);
 
-        if let Some(found) = self.inner.exact_matches.get(&query_key) {
+        if let Some(found) = self.exact_matches.get(&query_key) {
             let filtered = Self::filter_by_type(found, query_type);
             if !filtered.is_empty() {
                 return Some(filtered);
@@ -135,7 +125,7 @@ impl StaticFileBackend {
 
         let mut query_key = query_key.0.to_string();
         let query_trimmed = normalize_domain_str(&mut query_key);
-        for (suffix, rdata_list) in self.inner.wildcard_matches.iter() {
+        for (suffix, rdata_list) in self.wildcard_matches.iter() {
             if query_trimmed == *suffix || query_trimmed.ends_with(suffix) {
                 let filtered = Self::filter_by_type(rdata_list, query_type);
                 if !filtered.is_empty() {
@@ -172,13 +162,12 @@ fn normalize_domain_str(input: &mut str) -> &str {
     input.trim_end_matches('.')
 }
 
-#[async_trait]
 impl Backend for StaticFileBackend {
     async fn send_request(
         &self,
         message: Message,
         _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse> {
+    ) -> anyhow::Result<DnsResponseWrapper> {
         self.lookup_and_build_response(message)
     }
 }
@@ -187,13 +176,13 @@ impl Backend for StaticFileBackend {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use hickory_proto::op::{Message, Query};
+    use hickory_proto26::op::Query;
 
     use super::*;
     use crate::config::StaticRecord;
 
     fn create_query_message(domain: &str, record_type: RecordType) -> Message {
-        let mut message = Message::new();
+        let mut message = Message::query();
         message.add_query(Query::query(Name::from_utf8(domain).unwrap(), record_type));
         message.set_recursion_desired(true);
         message
@@ -203,7 +192,7 @@ mod tests {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234)
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_exact_match() {
         let config = StaticFileBackendConfig {
             records: vec![StaticRecord {
@@ -230,7 +219,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_wildcard_match() {
         let config = StaticFileBackendConfig {
             records: vec![StaticRecord {
@@ -263,7 +252,7 @@ mod tests {
         assert_eq!(response.answers().len(), 1);
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_no_match() {
         let config = StaticFileBackendConfig {
             records: vec![StaticRecord {
@@ -284,7 +273,7 @@ mod tests {
         assert_eq!(response.answers().len(), 0);
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_multiple_ips() {
         let config = StaticFileBackendConfig {
             records: vec![StaticRecord {
@@ -304,7 +293,7 @@ mod tests {
         assert_eq!(response.answers().len(), 2);
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_ipv6() {
         let config = StaticFileBackendConfig {
             records: vec![StaticRecord {

@@ -1,12 +1,13 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::rc::Rc;
 
-use async_trait::async_trait;
-use hickory_proto::op::{Edns, Message};
-use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
-use hickory_proto::xfer::DnsResponse;
+use hickory_proto26::op::{Edns as Edns26, Message as Message26};
+use hickory_proto26::rr::rdata::opt::{
+    ClientSubnet as ClientSubnet26, EdnsCode as EdnsCode26, EdnsOption as EdnsOption26,
+};
 use tower::Layer;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, DnsResponseWrapper, DynBackend};
 
 #[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct StaticEcsFilterLayer {
@@ -42,16 +43,15 @@ impl<B> Layer<B> for StaticEcsFilterLayer {
     }
 }
 
-#[async_trait]
-impl<B: Backend + Sync + Send + 'static> Backend for StaticEcsFilter<B> {
+impl Backend for StaticEcsFilter<Rc<dyn DynBackend>> {
     async fn send_request(
         &self,
-        mut message: Message,
+        mut message: Message26,
         src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse> {
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let extensions = message.extensions_mut();
-        let opt = extensions.get_or_insert_with(Edns::new).options_mut();
-        if opt.get(EdnsCode::Subnet).is_none() {
+        let opt = extensions.get_or_insert_with(Edns26::new).options_mut();
+        if opt.get(EdnsCode26::Subnet).is_none() {
             let addr_and_prefix = match src.ip() {
                 IpAddr::V4(_) => self
                     .ipv4_prefix
@@ -62,10 +62,10 @@ impl<B: Backend + Sync + Send + 'static> Backend for StaticEcsFilter<B> {
             };
 
             if let Some((addr, prefix)) = addr_and_prefix {
-                opt.insert(EdnsOption::Subnet(ClientSubnet::new(addr, prefix, 0)));
+                opt.insert(EdnsOption26::Subnet(ClientSubnet26::new(addr, prefix, 0)));
             }
         }
 
-        self.backend.send_request(message, src).await
+        self.backend.dyn_send_request(message, src).await
     }
 }

@@ -1,176 +1,141 @@
 use std::collections::HashSet;
-use std::fmt::{Debug, Formatter};
-use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::io;
+use std::net::{IpAddr, SocketAddr};
+use std::rc::Rc;
 
-use async_trait::async_trait;
-use futures_util::TryStreamExt;
-use hickory_proto::h2::{HttpsClientStream, HttpsClientStreamBuilder};
-use hickory_proto::op::Message;
-use hickory_proto::runtime::TokioRuntimeProvider;
-use hickory_proto::xfer::{
-    DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse, FirstAnswer,
-};
-use rand::prelude::*;
+use cyper::Client;
+use cyper::resolve::Resolve;
+use futures_util::{AsyncReadExt, Stream, TryStreamExt, stream};
+use hickory_proto26::op::{DnsRequest, DnsRequestOptions, DnsResponse, Message};
+use http::{StatusCode, Uri, Version};
 use rand::rng;
-use rustls::{ClientConfig, RootCertStore};
-use tracing::{Instrument, info_span, instrument};
+use rand::seq::IteratorRandom;
+use tracing::{error, instrument};
 
-use crate::backend::Backend;
+use super::{Backend, DnsResponseWrapper};
 
 #[derive(Debug)]
 pub struct HttpsBackend {
-    inner: Arc<HttpsBackendInner>,
+    url: String,
+    client: Client,
+    is_h3: bool,
 }
 
 impl HttpsBackend {
-    pub fn new(
-        addrs: HashSet<SocketAddr>,
-        host: String,
-        query_path: String,
-    ) -> anyhow::Result<Self> {
-        let mut root_cert_store = RootCertStore::empty();
-        let certs = rustls_native_certs::load_native_certs();
-        if !certs.errors.is_empty() {
-            return Err(anyhow::anyhow!(
-                "load native cert errors: {:?}",
-                certs.errors
-            ));
-        }
-        for cert in certs.certs {
-            root_cert_store.add(cert)?;
-        }
+    pub fn new(url: String, ips: impl IntoIterator<Item = IpAddr>, is_h3: bool) -> Self {
+        let resolver = Resolver {
+            addrs: Rc::new(ips.into_iter().collect()),
+        };
 
-        let client_config = ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth();
+        let client = Client::builder()
+            .custom_resolver(resolver)
+            .use_rustls_default()
+            .build();
 
-        Ok(Self {
-            inner: Arc::new(HttpsBackendInner {
-                addrs,
-                host,
-                query_path,
-                builder: HttpsClientStreamBuilder::with_client_config(
-                    Arc::new(client_config),
-                    TokioRuntimeProvider::new(),
-                ),
-                stream_cache: RwLock::new(None),
-            }),
-        })
-    }
-
-    async fn build_stream(&self) -> anyhow::Result<HttpsClientStream> {
-        let addr = self
-            .inner
-            .addrs
-            .iter()
-            .copied()
-            .choose(&mut rng())
-            .expect("addrs must not empty");
-
-        self.inner
-            .builder
-            .clone()
-            .build(addr, self.inner.host.clone(), self.inner.query_path.clone())
-            .await
-            .map_err(Into::into)
-    }
-
-    #[instrument(skip(stream), ret, err)]
-    async fn do_send_with_stream(
-        stream: &mut HttpsClientStream,
-        message: Message,
-    ) -> anyhow::Result<DnsResponse> {
-        stream
-            .try_next()
-            .instrument(info_span!("wait_stream_ready"))
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("https stream connected but closed immediately"))?;
-
-        let mut options = DnsRequestOptions::default();
-        options.use_edns = true;
-        let request = DnsRequest::new(message, options);
-        let dns_response = stream
-            .send_message(request)
-            .first_answer()
-            .instrument(info_span!("first_answer"))
-            .await?;
-
-        Ok(dns_response)
-    }
-
-    #[instrument(skip(self), ret, err)]
-    async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponse> {
-        let stream = self.inner.stream_cache.read().unwrap().clone();
-
-        if let Some(mut s) = stream {
-            match Self::do_send_with_stream(&mut s, message.clone()).await {
-                Ok(r) => return Ok(r),
-                Err(_) => {
-                    *self.inner.stream_cache.write().unwrap() = None;
-                }
-            }
-        }
-
-        let mut new_stream = self.build_stream().await?;
-        *self.inner.stream_cache.write().unwrap() = Some(new_stream.clone());
-
-        Self::do_send_with_stream(&mut new_stream, message).await
+        Self { url, client, is_h3 }
     }
 }
 
-struct HttpsBackendInner {
-    addrs: HashSet<SocketAddr>,
-    host: String,
-    query_path: String,
-    builder: HttpsClientStreamBuilder<TokioRuntimeProvider>,
-    stream_cache: RwLock<Option<HttpsClientStream>>,
-}
-
-impl Debug for HttpsBackendInner {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpsBackendInner")
-            .field("addrs", &self.addrs)
-            .field("host", &self.host)
-            .field("query_path", &self.query_path)
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
 impl Backend for HttpsBackend {
-    #[instrument(skip(self), ret, err)]
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
     async fn send_request(
         &self,
         message: Message,
         _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse> {
-        let res = self.do_send(message.clone()).await;
-        if res.is_ok() {
-            return res;
+    ) -> anyhow::Result<DnsResponseWrapper> {
+        let mut options = DnsRequestOptions::default();
+        options.use_edns = true;
+        let request = DnsRequest::new(message, options);
+        let request = request.to_vec()?;
+
+        let version = if self.is_h3 {
+            Version::HTTP_3
+        } else {
+            Version::HTTP_2
+        };
+
+        let response = self
+            .client
+            .post(&self.url)?
+            .version(version)
+            .header("content-type", "application/dns-message")?
+            .header("accept", "application/dns-message")?
+            .body(request)
+            .send()
+            .await?;
+
+        let status_code = response.status();
+        if status_code != StatusCode::OK {
+            error!(%status_code, "status code is not 200");
+
+            return Err(anyhow::anyhow!("status {status_code} is not 200"));
         }
 
-        self.do_send(message).await
+        let mut resp_stream = response
+            .bytes_stream()
+            .map_err(io::Error::other)
+            .into_async_read()
+            .take(4096);
+
+        let mut buf = Vec::with_capacity(4096);
+        resp_stream.read_to_end(&mut buf).await?;
+
+        Ok(DnsResponse::from_buffer(buf)?.into())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Resolver {
+    addrs: Rc<HashSet<IpAddr>>,
+}
+
+impl Resolve for Resolver {
+    type Err = cyper::Error;
+
+    async fn resolve(&self, _uri: &Uri) -> Result<impl Stream<Item = IpAddr> + '_, Self::Err> {
+        let addr = *self.addrs.iter().choose(&mut rng()).unwrap();
+
+        Ok(stream::iter([addr]))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::Ipv4Addr;
 
-    use super::super::tests::*;
+    use super::super::tests::{check_dns_response, create_query_message, init_tls_provider};
     use super::*;
 
-    #[tokio::test]
-    async fn test() {
+    #[compio::test]
+    async fn test_h2() {
         init_tls_provider();
 
         let backend = HttpsBackend::new(
-            ["1.12.12.21:443".parse().unwrap()].into(),
-            "doh.pub".to_string(),
-            "/dns-query".to_string(),
-        )
-        .unwrap();
+            "https://doh.pub/dns-query".to_string(),
+            ["1.12.12.21".parse().unwrap()],
+            false,
+        );
+
+        let dns_response = backend
+            .send_request(
+                create_query_message(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
+            )
+            .await
+            .unwrap();
+
+        check_dns_response(&dns_response);
+    }
+
+    #[compio::test]
+    async fn test_h3() {
+        init_tls_provider();
+
+        let backend = HttpsBackend::new(
+            "https://dns.alidns.com/dns-query".to_string(),
+            ["223.5.5.5".parse().unwrap()],
+            true,
+        );
 
         let dns_response = backend
             .send_request(

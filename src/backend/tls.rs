@@ -1,29 +1,47 @@
 use std::collections::HashSet;
-use std::fmt::Debug;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use deadpool::Runtime;
+use compio::BufResult;
+use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use compio::net::TcpStream;
+use compio::tls::{TlsConnector, TlsStream};
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
-use futures_util::TryStreamExt;
-use hickory_proto::op::Message;
-use hickory_proto::runtime::TokioRuntimeProvider;
-use hickory_proto::runtime::iocompat::AsyncIoTokioAsStd;
-use hickory_proto::rustls::tls_stream::TokioTlsClientStream;
-use hickory_proto::rustls::{TlsStream, tls_connect};
-use hickory_proto::xfer::{DnsResponse, SerialMessage};
-use hickory_proto::{BufDnsStreamHandle, DnsStreamHandle, ProtoError};
-use rand::{prelude::*, rng};
+use hickory_proto26::op::{DnsResponse, Message};
+use rand::rng;
+use rand::seq::IteratorRandom;
 use rustls::{ClientConfig, RootCertStore};
-use tokio::net::TcpStream;
-use tracing::instrument;
+use send_wrapper::SendWrapper;
+use tracing::{debug, instrument};
 
-use crate::backend::Backend;
+use super::{Backend, DnsResponseWrapper};
 
 #[derive(Debug)]
 pub struct TlsBackend {
     pool: Pool<TlsStreamManager>,
+}
+
+impl Backend for TlsBackend {
+    #[instrument(skip(self), ret(Display), fields(message = %message), err)]
+    async fn send_request(
+        &self,
+        message: Message,
+        _: SocketAddr,
+    ) -> anyhow::Result<DnsResponseWrapper> {
+        let request_data = message.to_vec()?;
+        let mut tls_stream = self.pool.get().await?;
+
+        match self.send_and_recv(&mut tls_stream, request_data).await {
+            Err(err) => {
+                let _ = Object::take(tls_stream);
+
+                Err(err)
+            }
+
+            Ok(resp) => Ok(resp),
+        }
+    }
 }
 
 impl TlsBackend {
@@ -48,36 +66,40 @@ impl TlsBackend {
             pool: Pool::builder(TlsStreamManager {
                 addrs,
                 name,
-                tls_client_config: client_config.into(),
+                tls_connector: Arc::new(client_config).into(),
             })
-            .runtime(Runtime::Tokio1)
             .build()?,
         })
     }
 
-    #[instrument(skip(self), ret, err)]
-    async fn do_send(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
-        let mut tls_stream = self.pool.get().await?;
-        let serial_message = SerialMessage::new(message.to_vec()?, src);
+    #[instrument(skip(request_data), ret(Display), err)]
+    async fn send_and_recv(
+        &self,
+        tls_stream: &mut TlsStream<TcpStream>,
+        request_data: Vec<u8>,
+    ) -> anyhow::Result<DnsResponseWrapper> {
+        let request_len = (request_data.len() as u16).to_be_bytes();
 
-        let result = async {
-            tls_stream.sender.send(serial_message)?;
-            let resp = tls_stream
-                .tls_stream
-                .try_next()
-                .await?
-                .ok_or_else(|| ProtoError::from("TLS stream EOF unexpected"))?;
+        tls_stream.write_all(request_len).await.0?;
+        tls_stream.write_all(request_data).await.0?;
+        tls_stream.flush().await?;
 
-            let buffer = resp.into_parts().0;
+        debug!("send request done");
 
-            DnsResponse::from_buffer(buffer)
+        let BufResult(res, len_buf) = tls_stream.read_exact([0; 2]).await;
+        res?;
+        let resp_len = u16::from_be_bytes(len_buf);
+
+        if resp_len == 0 {
+            return Err(anyhow::anyhow!("response length is 0"));
         }
-        .await
-        .inspect_err(|_| {
-            let _ = Object::<_>::take(tls_stream);
-        });
 
-        result.map_err(Into::into)
+        let BufResult(res, resp_data) = tls_stream
+            .read_exact(Vec::with_capacity(resp_len as usize))
+            .await;
+        res?;
+
+        Ok(DnsResponse::from_buffer(resp_data)?.into())
     }
 }
 
@@ -85,59 +107,31 @@ impl TlsBackend {
 struct TlsStreamManager {
     addrs: HashSet<SocketAddr>,
     name: String,
-    tls_client_config: Arc<ClientConfig>,
+    tls_connector: TlsConnector,
 }
 
 impl Manager for TlsStreamManager {
-    type Type = TlsStreamWrapper;
-    type Error = ProtoError;
+    type Type = SendWrapper<TlsStream<TcpStream>>;
+    type Error = io::Error;
 
     async fn create(&self) -> Result<Self::Type, Self::Error> {
-        let chosen_addr = self
-            .addrs
-            .iter()
-            .copied()
-            .choose(&mut rng())
-            .expect("addrs must not empty");
+        SendWrapper::new(async {
+            let addr = *self.addrs.iter().choose(&mut rng()).unwrap();
 
-        let (fut, sender) = tls_connect(
-            chosen_addr,
-            self.name.clone(),
-            self.tls_client_config.clone(),
-            TokioRuntimeProvider::new(),
-        );
+            let tcp_stream = TcpStream::connect(addr).await?;
+            let tls_stream = self.tls_connector.connect(&self.name, tcp_stream).await?;
 
-        let tls_stream = fut.await?;
-
-        Ok(TlsStreamWrapper { tls_stream, sender })
+            Ok(SendWrapper::new(tls_stream))
+        })
+        .await
     }
 
-    async fn recycle(&self, _: &mut Self::Type, _: &Metrics) -> RecycleResult<Self::Error> {
+    async fn recycle(
+        &self,
+        _obj: &mut Self::Type,
+        _metrics: &Metrics,
+    ) -> RecycleResult<Self::Error> {
         Ok(())
-    }
-}
-
-struct TlsStreamWrapper {
-    tls_stream: TlsStream<AsyncIoTokioAsStd<TokioTlsClientStream<AsyncIoTokioAsStd<TcpStream>>>>,
-    sender: BufDnsStreamHandle,
-}
-
-impl Debug for TlsStreamWrapper {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TlsStreamWrapper").finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl Backend for TlsBackend {
-    #[instrument(skip(self), ret, err)]
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
-        let res = self.do_send(message.clone(), src).await;
-        if res.is_ok() {
-            return res;
-        }
-
-        self.do_send(message, src).await
     }
 }
 
@@ -145,10 +139,10 @@ impl Backend for TlsBackend {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use super::super::tests::*;
+    use super::super::tests::{check_dns_response, create_query_message, init_tls_provider};
     use super::*;
 
-    #[tokio::test]
+    #[compio::test]
     async fn test() {
         init_tls_provider();
 
